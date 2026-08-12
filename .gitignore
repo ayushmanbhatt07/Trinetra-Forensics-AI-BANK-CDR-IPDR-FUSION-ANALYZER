@@ -161,3 +161,15 @@ docs/_build/
 
 # CatBoost training artifacts
 catboost_info/
+
+# Runtime data (SQLite bundle store + case folders) - NEVER COMMIT
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
