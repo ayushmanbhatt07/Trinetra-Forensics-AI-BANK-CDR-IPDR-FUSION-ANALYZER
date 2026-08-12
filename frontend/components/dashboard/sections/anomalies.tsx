@@ -73,8 +73,8 @@ export function AnomaliesSection() {
         if (!mounted) return;
         setPipelineState(ps);
         
-        if (ps && !ps.ready) {
-           timeoutId = window.setTimeout(checkPipeline, 1000);
+        if (ps && !ps.ready && ps.status !== "IDLE") {
+           timeoutId = window.setTimeout(checkPipeline, 2500);
         } else {
            fetchAlerts();
         }

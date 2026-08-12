@@ -73,8 +73,8 @@ export function FusedSection() {
         const ps = await api.pipelineStatus();
         if (!isActive) return;
         setPipelineState(ps);
-        if (ps && !ps.ready) {
-           t = setTimeout(poll, 1000);
+        if (ps && !ps.ready && ps.status !== "IDLE") {
+           t = setTimeout(poll, 2500);
         }
       } catch (e) { }
     };
