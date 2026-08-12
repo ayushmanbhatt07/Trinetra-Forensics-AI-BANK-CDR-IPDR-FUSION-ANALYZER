@@ -219,7 +219,7 @@ def ingest(req: IngestRequest, user: dict = Depends(auth.require_user)) -> Inges
     except Exception:
         raise HTTPException(400, "invalid path format")
     
-    if not str(requested_path).startswith(str(base_dir)):
+    if not requested_path.is_relative_to(base_dir):
         raise HTTPException(403, "path traversal blocked: folder must be inside data directory")
         
     if not requested_path.is_dir():
@@ -360,9 +360,13 @@ def graph_ip(phone: str, user: dict = Depends(auth.require_user)):
 @app.get("/report/entity/{kind}/{value}")
 def entity_report(kind: str, value: str,
                   user: dict = Depends(auth.require_user)):
+    if kind not in ("account", "phone", "upi", "imei", "imsi", "ip", "name"):
+        raise HTTPException(400, f"unsupported entity kind: {kind}")
     b = _require_bundle()
+    import hashlib
+    safe_val = hashlib.sha256(value.encode()).hexdigest()[:16]
     path = os.path.join(tempfile.gettempdir(),
-                        f"str_entity_{kind}_{abs(hash(value)) % 100000}.pdf")
+                        f"str_entity_{kind}_{safe_val}.pdf")
     try:
         generate_entity_str_report(b, kind, value, path)
     except ValueError as e:
@@ -463,6 +467,9 @@ def entities(user: dict = Depends(auth.require_user)):
 
 def _run_pipeline_background(bundle: dict) -> None:
     def _run() -> None:
+        import time
+        t0 = time.time()
+        ds_id = _pipeline.get("dataset_id", "unknown")
         try:
             from backend.fusion import cached_fused_base, cached_build_timeline
             from backend.graphs import cached_money_graph, cached_account_phone_graph, cached_phone_call_graph
@@ -470,19 +477,23 @@ def _run_pipeline_background(bundle: dict) -> None:
             
             _pipeline["status"] = "FUSING"
             _pipeline["progress"] = 25
+            _log.info("[PIPELINE] dataset=%s stage=FUSING progress=25", ds_id)
             cached_fused_base(bundle)
             cached_build_timeline(bundle)
             
             # Fused data is ready — page can now render without waiting for ML
             _pipeline["status"] = "FUSED_READY"
             _pipeline["progress"] = 40
+            _log.info("[PIPELINE] dataset=%s stage=FUSED_READY progress=40 elapsed=%.2fs", ds_id, time.time() - t0)
             
             _pipeline["status"] = "SCORING"
             _pipeline["progress"] = 50
+            _log.info("[PIPELINE] dataset=%s stage=SCORING progress=50", ds_id)
             hybrid.hybrid_analyze(bundle)
             
             _pipeline["status"] = "GRAPHS"
             _pipeline["progress"] = 85
+            _log.info("[PIPELINE] dataset=%s stage=GRAPHS progress=85", ds_id)
             cached_money_graph(bundle)
             cached_account_phone_graph(bundle)
             cached_phone_call_graph(bundle)
@@ -490,13 +501,14 @@ def _run_pipeline_background(bundle: dict) -> None:
             _pipeline["status"] = "READY"
             _pipeline["progress"] = 100
             _pipeline["ready"] = True
+            _log.info("[PIPELINE] dataset=%s stage=READY progress=100 total_elapsed=%.2fs", ds_id, time.time() - t0)
             
             _state["hybrid_warm"] = True
             _log.info("hybrid engine warmed (%d txns)", len(bundle.get("bank", [])))
         except Exception:
             _state["hybrid_warm"] = False
             _pipeline["status"] = "ERROR"
-            _log.exception("hybrid engine warm-up failed")
+            _log.exception("[PIPELINE] dataset=%s stage=ERROR pipeline execution failed", ds_id)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -710,8 +722,10 @@ def loading_status(user: dict = Depends(auth.require_user)):
 def transaction_report(transaction_id: str,
                        user: dict = Depends(auth.require_user)):
     b = _require_bundle()
+    import hashlib
+    safe_id = hashlib.sha256(transaction_id.encode()).hexdigest()[:16]
     path = os.path.join(tempfile.gettempdir(),
-                        f"str_transaction_{transaction_id}.pdf")
+                        f"str_transaction_{safe_id}.pdf")
     try:
         generate_transaction_str_report(b, transaction_id, path)
     except ValueError:

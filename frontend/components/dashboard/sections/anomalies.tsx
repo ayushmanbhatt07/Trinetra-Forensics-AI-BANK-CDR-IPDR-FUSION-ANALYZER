@@ -62,7 +62,10 @@ export function AnomaliesSection() {
         })
         .catch((error) => {
           if (!mounted) return;
-          toast.error("Failed to load anomaly alerts. Is the backend running?");
+          const err = error as { status?: number };
+          if (err.status !== 409 && err.status !== 425 && err.status !== 401) {
+            toast.error("Failed to load anomaly alerts. Is the backend running?");
+          }
           setAlertsLoading(false);
         });
     };
@@ -73,7 +76,7 @@ export function AnomaliesSection() {
         if (!mounted) return;
         setPipelineState(ps);
         
-        if (ps && !ps.ready && ps.status !== "IDLE") {
+        if (ps && !ps.ready && ps.status !== "IDLE" && ps.status !== "ERROR") {
            timeoutId = window.setTimeout(checkPipeline, 2500);
         } else {
            fetchAlerts();

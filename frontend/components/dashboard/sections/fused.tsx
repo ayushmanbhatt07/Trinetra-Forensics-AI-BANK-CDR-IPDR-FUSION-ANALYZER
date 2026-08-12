@@ -56,7 +56,7 @@ export function FusedSection() {
       })
       .catch((error) => {
         const err = error as { status?: number };
-        if (err.status !== 409) {
+        if (err.status !== 409 && err.status !== 425 && err.status !== 401) {
           toast.error("Failed to load fused records. Is the backend running?");
         }
         setRows([]);
@@ -73,7 +73,7 @@ export function FusedSection() {
         const ps = await api.pipelineStatus();
         if (!isActive) return;
         setPipelineState(ps);
-        if (ps && !ps.ready && ps.status !== "IDLE") {
+        if (ps && !ps.ready && ps.status !== "IDLE" && ps.status !== "ERROR") {
            t = setTimeout(poll, 2500);
         }
       } catch (e) { }
@@ -84,7 +84,6 @@ export function FusedSection() {
 
   useEffect(() => {
     if (!pipelineState) {
-        loadFused();
         return;
     }
     // PARSING and FUSING: no fused data yet, don't load
