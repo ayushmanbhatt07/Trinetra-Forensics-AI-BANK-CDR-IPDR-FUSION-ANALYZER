@@ -1,5 +1,6 @@
 import time
 import requests
+import os
 
 def measure_workflow():
     print("--- RUN ---")
@@ -52,15 +53,21 @@ def measure_workflow():
         "anomalies_page": anomalies_page_time,
     }
 
-headers = {"Authorization": "Bearer TEST"}
+headers = {}
 
 print("Setting up auth token... skipping auth for script by mocking or using a valid token.")
 # Let's bypass auth for local testing by modifying api.py to allow it, or just use the UI.
 # Actually, the user wants us to run the workflow 3 times. We can just login first.
 
 def login_and_measure():
-    r = requests.post("http://localhost:10000/auth/register", json={"username": "testaudit", "password": "TestPass123!"})
-    r = requests.post("http://localhost:10000/auth/login", json={"username": "testaudit", "password": "TestPass123!"})
+    test_user = os.environ.get("TEST_USERNAME", "testaudit")
+    test_pass = os.environ.get("TEST_PASSWORD")
+    if not test_pass:
+        print("Set TEST_PASSWORD environment variable to run this script.")
+        return
+        
+    r = requests.post("http://localhost:10000/auth/register", json={"username": test_user, "password": test_pass})
+    r = requests.post("http://localhost:10000/auth/login", json={"username": test_user, "password": test_pass})
     token = r.json().get("access_token")
     if not token:
         print("Login failed:", r.json())
