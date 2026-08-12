@@ -152,11 +152,12 @@ export function IngestionSection() {
           {isUploading ? (
             <>
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              FUSING DATASETS...
+              Fusing Datasets...
             </>
           ) : (
             "BEGIN FUSION PIPELINE"
           )}
+
         </Button>
       </div>
     </div>

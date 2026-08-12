@@ -65,37 +65,60 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
     if n < 4:
         return out
 
+    # Pre-import scikit-learn modules on the main thread to avoid thread-unsafe import locks
+    try:
+        from sklearn.ensemble import IsolationForest
+        from sklearn.neighbors import LocalOutlierFactor
+        from sklearn.cluster import DBSCAN
+        from sklearn.svm import OneClassSVM
+        from sklearn.decomposition import PCA
+    except Exception as exc:
+        logger.error("[ENSEMBLE] scikit-learn import error: %s", exc)
+        return out
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _isolation_forest():
-        from sklearn.ensemble import IsolationForest
-        forest = IsolationForest(n_estimators=100, contamination=0.1,
-                                 random_state=42, n_jobs=-1)
-        pred = forest.fit_predict(X)
-        raw = -forest.score_samples(X)
-        raw[pred == 1] = 0.0
-        return "isolation_forest", _rank_normalise(raw)
+        try:
+            forest = IsolationForest(n_estimators=100, contamination=0.1,
+                                     random_state=42, n_jobs=1)
+            pred = forest.fit_predict(X)
+            raw = -forest.score_samples(X)
+            raw[pred == 1] = 0.0
+            return "isolation_forest", _rank_normalise(raw)
+        except Exception as exc:
+            logger.warning("[ENSEMBLE] isolation_forest failed: %s", exc)
+            return None
 
     def _lof():
-        from sklearn.neighbors import LocalOutlierFactor
-        lof = LocalOutlierFactor(n_neighbors=min(20, max(2, n - 1)),
-                                 contamination=0.1, novelty=False)
-        lof.fit_predict(X)
-        return "lof", _rank_normalise(-lof.negative_outlier_factor_)
+        try:
+            lof = LocalOutlierFactor(n_neighbors=min(20, max(2, n - 1)),
+                                     contamination=0.1, novelty=False)
+            lof.fit_predict(X)
+            return "lof", _rank_normalise(-lof.negative_outlier_factor_)
+        except Exception as exc:
+            logger.warning("[ENSEMBLE] lof failed: %s", exc)
+            return None
 
     def _dbscan():
-        from sklearn.cluster import DBSCAN
-        db = DBSCAN(eps=1.5, min_samples=5).fit(X)
-        labels = db.labels_
-        core = db.core_sample_indices_
-        raw_db = np.zeros(n)
-        for i in range(n):
-            if labels[i] == -1:
-                d = np.linalg.norm(X - X[i], axis=1)
-                d[i] = np.inf
-                nbr = d[core].min() if len(core) else d.min()
-                raw_db[i] = max(0.0, 3.0 - float(nbr))
-        return "dbscan", _rank_normalise(raw_db)
+        try:
+            db = DBSCAN(eps=1.5, min_samples=5).fit(X)
+            labels = db.labels_
+            core = db.core_sample_indices_
+            raw_db = np.zeros(n)
+            noise_idx = np.where(labels == -1)[0]
+            if len(noise_idx) > 0:
+                if len(core) > 0:
+                    core_sub = core[:500] if len(core) > 500 else core
+                    dists = np.linalg.norm(X[noise_idx, None, :] - X[core_sub[None, :], :], axis=2)
+                    min_dists = dists.min(axis=1)
+                    raw_db[noise_idx] = np.maximum(0.0, 3.0 - min_dists)
+                else:
+                    raw_db[noise_idx] = 3.0
+            return "dbscan", _rank_normalise(raw_db)
+        except Exception as exc:
+            logger.warning("[ENSEMBLE] dbscan failed: %s", exc)
+            return None
 
     def _hdbscan():
         try:
@@ -108,48 +131,57 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
                 raw_hd = np.zeros(n)
             return "hdbscan", _rank_normalise(raw_hd)
         except Exception as exc:
-            logger.warning("hdbscan unavailable: %s", exc)
+            logger.warning("[ENSEMBLE] hdbscan unavailable: %s", exc)
             return None
 
     def _ocsvm():
-        from sklearn.svm import OneClassSVM
-        # Subsample for SVM to avoid O(n^2) quadratic blowup on large datasets
-        max_svm = 2000
-        if n > max_svm:
-            idx = np.random.default_rng(42).choice(n, max_svm, replace=False)
-            X_sub = X[idx]
-        else:
-            X_sub = X
-        svm = OneClassSVM(nu=0.1, kernel="rbf", gamma="scale")
-        svm.fit(X_sub)
-        return "one_class_svm", _rank_normalise(-svm.decision_function(X))
+        try:
+            max_svm = 1000
+            if n > max_svm:
+                idx = np.random.default_rng(42).choice(n, max_svm, replace=False)
+                X_sub = X[idx]
+            else:
+                X_sub = X
+            svm = OneClassSVM(nu=0.1, kernel="rbf", gamma="scale")
+            svm.fit(X_sub)
+            return "one_class_svm", _rank_normalise(-svm.decision_function(X))
+        except Exception as exc:
+            logger.warning("[ENSEMBLE] ocsvm failed: %s", exc)
+            return None
 
     def _pca():
         try:
-            from sklearn.decomposition import PCA
             k = min(12, max(2, X.shape[1] - 1), n - 1)
             pca = PCA(n_components=k)
             proj = pca.fit_transform(X)
             recon = pca.inverse_transform(proj)
             return "pca", _rank_normalise(np.linalg.norm(X - recon, axis=1))
         except Exception as exc:
-            logger.warning("pca unavailable: %s", exc)
+            logger.warning("[ENSEMBLE] pca unavailable: %s", exc)
             return None
 
     def _zscore():
-        z = np.abs((X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9))
-        return "zscore", _rank_normalise(z.max(axis=1))
+        try:
+            z = np.abs((X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9))
+            return "zscore", _rank_normalise(z.max(axis=1))
+        except Exception as exc:
+            logger.warning("[ENSEMBLE] zscore failed: %s", exc)
+            return None
 
     detectors = [_isolation_forest, _lof, _dbscan, _hdbscan, _ocsvm, _pca, _zscore]
     with ThreadPoolExecutor(max_workers=len(detectors)) as ex:
         futures = [ex.submit(fn) for fn in detectors]
         for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                name, scores = result
-                out[name] = scores
+            try:
+                result = future.result()
+                if result is not None:
+                    name, scores = result
+                    out[name] = scores
+            except Exception as exc:
+                logger.warning("[ENSEMBLE] detector execution failed: %s", exc)
 
     return out
+
 
 
 def _run_supervised(X: np.ndarray, y: np.ndarray,

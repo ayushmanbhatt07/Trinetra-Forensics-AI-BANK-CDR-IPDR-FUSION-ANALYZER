@@ -185,13 +185,14 @@ export function FusedSection() {
           {pipeline && (pipeline.status === "PARSING" || pipeline.status === "FUSING" || (!isFusedReady && isProcessing)) ? (
             <div className="flex h-full flex-col items-center justify-center space-y-4">
               <Loader2 className="size-8 text-cyan-500 animate-spin" />
-              <p className="text-cyan-500 font-medium">
-                {pipeline.status === "PARSING" ? "Parsing & Normalizing..." : "Fusing Datasets..."} {pipeline.progress}%
+              <p className="text-cyan-500 font-medium text-base">
+                {pipeline.status === "PARSING" ? "Parsing & Normalizing Datasets..." : "Fusing Bank, CDR and IPDR data..."}
               </p>
               <p className="text-muted-foreground text-sm max-w-sm text-center">
-                Unifying transaction logs with telecom CDR and IPDR sessions. The dataset will appear automatically.
+                Unifying transaction logs with telecom CDR and IPDR sessions. Fused dataset will appear automatically when ready.
               </p>
             </div>
+
           ) : warmupError ? (
             <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center text-muted-foreground">
               <Loader2 className="size-6 text-amber-400 animate-spin" />

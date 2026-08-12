@@ -103,9 +103,15 @@ export function AnomaliesSection() {
     <div className="space-y-6 h-[calc(100vh-12rem)]">
       <div className="flex h-full flex-col rounded-xl border border-border/70 bg-card/60 backdrop-blur">
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-          <Badge variant="outline" className="border-rose-500/40 text-rose-400 bg-rose-500/10">
-            <ShieldAlert className="mr-1 size-3.5" /> High Risk Feed ({alerts.length})
-          </Badge>
+          {pipeline && !isAnomaliesReady && isProcessing ? (
+            <Badge variant="outline" className="border-amber-500/40 text-amber-400 bg-amber-500/10">
+              <Loader2 className="mr-1 size-3.5 animate-spin" /> AI Risk Scoring in Progress
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="border-rose-500/40 text-rose-400 bg-rose-500/10">
+              <ShieldAlert className="mr-1 size-3.5" /> High Risk Feed ({alerts.length})
+            </Badge>
+          )}
           <div className="ml-auto flex items-center gap-2">
             <Button
               variant="outline"
@@ -122,15 +128,21 @@ export function AnomaliesSection() {
           {pipeline && !isAnomaliesReady && isProcessing ? (
             <div className="flex h-full flex-col items-center justify-center space-y-4">
               <Loader2 className="size-8 text-rose-500 animate-spin" />
-              <p className="text-rose-500 font-medium">
-                {pipeline.status === "PARSING" ? "Parsing & Normalizing" : 
-                 pipeline.status === "FUSING" ? "Fusing Datasets" :
-                 pipeline.status === "SCORING" ? "AI Risk Scoring" : "Building Analytics"}... {pipeline.progress}%
+              <p className="text-rose-500 font-medium text-base">
+                {pipeline.status === "PARSING" ? "Parsing & Normalizing Datasets..." : 
+                 pipeline.status === "FUSING" ? "Fusing Bank, CDR and IPDR Records..." :
+                 pipeline.status === "SCORING" ? "AI Risk Scoring in Progress..." : "Building Analytics..."}
               </p>
               <p className="text-muted-foreground text-sm max-w-sm text-center">
-                Computing behavioral profiles and fraud heat.
-                Anomalies will be available when scoring completes.
+                Computing behavioral profiles, ML ensemble models, and fraud heat.
+                Anomaly records will appear automatically when scoring completes.
               </p>
+            </div>
+          ) : pipeline?.status === "ERROR" || pipeline?.error ? (
+            <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center">
+              <AlertTriangle className="size-8 text-red-500" />
+              <p className="text-red-500 font-medium">Pipeline Execution Failed</p>
+              <p className="text-xs text-muted-foreground max-w-md">{pipeline.error || "Scoring pipeline encountered an unexpected error."}</p>
             </div>
           ) : warmupError ? (
             <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center text-muted-foreground">
@@ -141,8 +153,11 @@ export function AnomaliesSection() {
           ) : alertsLoading ? (
             <div className="p-8 text-center text-muted-foreground animate-pulse">Loading anomalies...</div>
           ) : alerts.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground">No anomalies above risk 50 found. Ingest data first.</div>
+            <div className="p-8 text-center text-muted-foreground">
+              No transaction anomalies above risk score 50 found in current dataset.
+            </div>
           ) : (
+
             <div className="overflow-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-muted/60 text-muted-foreground z-10">
