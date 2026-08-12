@@ -20,6 +20,7 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
+import { toast } from "sonner";
 
 const TOKEN_KEY = "backend_token";
 const USER_KEY = "backend_user";
@@ -77,6 +78,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
       .finally(() => setReady(true));
   }, []);
+
+  useEffect(() => {
+    const handle401 = () => {
+      window.localStorage.removeItem(TOKEN_KEY);
+      window.localStorage.removeItem(USER_KEY);
+      setToken(null);
+      setUser(null);
+      toast.error("Session expired or token invalid. Please sign in again.");
+      router.replace("/login");
+    };
+    window.addEventListener("api:401", handle401);
+    return () => window.removeEventListener("api:401", handle401);
+  }, [router]);
+
 
   const login = useCallback(
     async (username: string, password: string) => {

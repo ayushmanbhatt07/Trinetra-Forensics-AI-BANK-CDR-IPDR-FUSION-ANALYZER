@@ -161,11 +161,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     const res = await fetch(apiBaseUrl() + path, { ...init, headers });
     if (!res.ok) {
-      if (res.status === 409) {
+      if (res.status === 401) {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("api:401"));
+        }
+      } else if (res.status === 409) {
         if (typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("api:409"));
         }
       }
+
       let detail = `HTTP ${res.status}`;
       try {
         const body = await res.json();

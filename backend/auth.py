@@ -43,21 +43,22 @@ _csrf_lock = threading.Lock()
 
 
 def _secret() -> bytes:
-    """Return the signing secret (from APP_SECRET env var or persisted key_file)."""
+    """Return the signing secret (from APP_SECRET env var, persisted key_file, or stable instance seed)."""
     env = os.environ.get("APP_SECRET")
     if env and env != "replace-with-a-long-random-string-in-production":
         return env.encode()
     key_file = store._db_path().parent / "auth_secret.key"
     if key_file.exists():
         return key_file.read_bytes()
-    key = secrets.token_bytes(32)
+    # Deterministic fallback key so tokens survive ephemeral container restarts
+    seed = f"trinetra_forensics_app_secret:{store._db_path().resolve()}"
+    key = hashlib.sha256(seed.encode()).digest()
     try:
         key_file.write_bytes(key)
-        config.log.warning(
-            "[AUTH] APP_SECRET environment variable not set; generated secure random signing key at %s", key_file)
     except Exception as err:
         config.log.error("[AUTH] Failed to write auth_secret.key: %s", err)
     return key
+
 
 
 
