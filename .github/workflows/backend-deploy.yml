@@ -1,0 +1,150 @@
+name: Backend Deploy
+
+on:
+  workflow_run:
+    workflows: ["Backend CI"]
+    types:
+      - completed
+    branches: [ main ]
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # GHCR requires lowercase repository names
+  IMAGE_NAME: ${{ github.repository }}-backend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set CI commit variables
+        run: |
+          CI_SHA="${{ github.event.workflow_run.head_sha }}"
+          echo "CI_SHA=${CI_SHA}" >> $GITHUB_ENV
+          echo "CI_SHORT_SHA=${CI_SHA::7}" >> $GITHUB_ENV
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Downcase repository name for GHCR
+        run: |
+          echo "IMAGE_NAME=${IMAGE_NAME,,}" >> $GITHUB_ENV
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=sha-${{ env.CI_SHORT_SHA }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            # Authenticate to GHCR on the server to pull the image
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+            
+            # Identify exact image to deploy
+            NEW_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ env.CI_SHORT_SHA }}"
+            
+            # Pull the new image
+            docker pull $NEW_IMAGE
+            
+            # Capture the currently running image for rollback
+            OLD_IMAGE=$(docker inspect --format='{{.Config.Image}}' trinetra-backend 2>/dev/null || echo "")
+            
+            # Stop and remove the existing container
+            docker stop trinetra-backend || true
+            docker rm trinetra-backend || true
+            
+            # Ensure the deployment data directory exists
+            mkdir -p /opt/trinetra/data
+            mkdir -p /opt/trinetra/data/cases
+            
+            # Start the new container
+            docker run -d \
+              --name trinetra-backend \
+              --restart unless-stopped \
+              -p 8000:8000 \
+              -v /opt/trinetra/data:/app/data \
+              --env-file /opt/trinetra/.env \
+              $NEW_IMAGE
+            
+            # Health check loop (wait up to 60 seconds)
+            echo "Waiting for container to start..."
+            HEALTHY=false
+            for i in {1..12}; do
+              if curl -s -f http://localhost:8000/health > /dev/null; then
+                HEALTHY=true
+                break
+              fi
+              sleep 5
+            done
+            
+            if [ "$HEALTHY" = true ]; then
+              echo "Deployment successful."
+              exit 0
+            else
+              echo "Health check failed! Rolling back to previous version..."
+              docker stop trinetra-backend || true
+              docker rm trinetra-backend || true
+              
+              if [ -n "$OLD_IMAGE" ]; then
+                docker run -d \
+                  --name trinetra-backend \
+                  --restart unless-stopped \
+                  -p 8000:8000 \
+                  -v /opt/trinetra/data:/app/data \
+                  --env-file /opt/trinetra/.env \
+                  $OLD_IMAGE
+                
+                echo "Waiting for rollback container to start..."
+                ROLLBACK_HEALTHY=false
+                for j in {1..12}; do
+                  if curl -s -f http://localhost:8000/health > /dev/null; then
+                    ROLLBACK_HEALTHY=true
+                    break
+                  fi
+                  sleep 5
+                done
+                
+                if [ "$ROLLBACK_HEALTHY" = true ]; then
+                  echo "Rollback to $OLD_IMAGE completed successfully. Marking deployment as failed."
+                else
+                  echo "Rollback to $OLD_IMAGE FAILED health check. Service may be down."
+                fi
+              else
+                echo "No previous image found. Service is down."
+              fi
+              exit 1
+            fi

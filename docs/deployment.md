@@ -1,60 +1,126 @@
-# Deployment Guide
+# Trinetra / OmniWatcher Backend Deployment Guide
 
-This document outlines how to deploy Tri-Netra Forensics. The deployment architecture relies on Docker for containerization, ensuring consistency across development and production environments.
+This document outlines the architecture and procedures for deploying the Trinetra FastAPI backend to an Ubuntu server using Docker and GitHub Actions.
 
-## 1. Prerequisites
-- **Docker**: Engine 24.0+
-- **Docker Compose**: V2+
-- **Ports**: 3000 (Frontend), 10000 (Backend API) must be available on the host machine.
+## A. Architecture
 
-## 2. Environment Configuration
-The backend requires a `.env` file to function properly, primarily for the AI Copilot.
+*   **Frontend:** Next.js (hosted separately).
+*   **Backend:** FastAPI running in a Docker container on an Ubuntu 22.04 server.
+*   **CI/CD:** GitHub Actions workflows for testing and deployment.
+*   **Container Registry:** GitHub Container Registry (GHCR).
+*   **Deployment Method:** SSH from GitHub Actions.
 
-Create `backend/.env`:
-```env
-# Groq API Keys for the Investigative Copilot
-GROQ_API_KEY_1=gsk_your_primary_key_here
-GROQ_API_KEY_2=gsk_your_fallback_key_here
-```
-
-## 3. Local Development Deployment
-For active development without Docker:
+## B. Local Development
 
 ### Backend
+To run the backend locally for development:
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 10000
+python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000
 ```
+Ensure you have a `.env` file based on `.env.example`.
 
 ### Frontend
+To run the frontend locally, use the existing Next.js commands:
 ```bash
 cd frontend
-npm install
 npm run dev
 ```
-The workspace will be available at `http://localhost:3000`.
-
-## 4. Production Deployment (Docker Compose)
-The root directory contains a `docker-compose.yml` file that orchestrates the entire stack.
-
-```bash
-# Build and start the containers in detached mode
-docker-compose up --build -d
+Configure your `frontend/.env.local` with:
+```properties
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-### Container Topology
-* **`trinetra-backend`**: Runs the FastAPI application using Gunicorn/Uvicorn workers. Maps internal port 10000 to host port 10000.
-* **`trinetra-frontend`**: Builds the Next.js static output and serves it, or runs the Next.js production server. Maps internal port 3000 to host port 3000.
+## C. Docker Local Test
 
-### Persistent Storage
-In the Docker environment, the `backend.db` state file is persisted via a Docker volume mounted to the backend container. This ensures that restarting the containers does not wipe the active investigation data.
+You can build and test the production Docker image locally to verify it works as expected.
 
-## 5. Reverse Proxy (Nginx)
-For a true production setup, an Nginx reverse proxy is recommended to handle SSL termination and route traffic:
-* `/` -> Routes to the Next.js frontend (Port 3000)
-* `/api/` -> Routes to the FastAPI backend (Port 10000)
+1.  **Build the image:**
+    ```bash
+    docker build -t trinetra-backend .
+    ```
+2.  **Run the container (PowerShell):**
+    ```powershell
+    docker run --rm -p 8000:8000 -v "${PWD}/data:/app/data" trinetra-backend
+    ```
+3.  **Verify:**
+    *   Health check: `http://localhost:8000/health`
+    *   Swagger UI: `http://localhost:8000/docs`
 
-An example `nginx.conf` is provided in the repository root.
+## D. GitHub Container Registry (GHCR)
+
+The CI/CD pipeline builds the Docker image and pushes it to GHCR.
+*   **Image Naming:** `ghcr.io/<owner>/<repository>-backend`
+*   **Tags:** Images are tagged with `latest` and the short commit SHA (e.g., `sha-a1b2c3d`) for reliable rollbacks.
+*   **Authentication:** The GitHub Actions workflow uses the built-in `GITHUB_TOKEN` to authenticate and push to GHCR.
+
+## E. GitHub Secrets
+
+For the deployment workflow (`.github/workflows/backend-deploy.yml`) to securely SSH into your Ubuntu server, you must configure the following Repository Secrets in GitHub (`Settings` -> `Secrets and variables` -> `Actions`):
+
+*   `SERVER_HOST`: The IP address or domain name of your Ubuntu server.
+*   `SERVER_USER`: The SSH username (e.g., `root`).
+*   `SERVER_SSH_KEY`: The private SSH key allowing access to the server.
+*   `GHCR_USERNAME`: Your GitHub username for the server to pull images.
+*   `GHCR_TOKEN`: A Personal Access Token (PAT) with `read:packages` permission.
+
+## F. Server Preparation
+
+Before the first deployment, you must prepare the Ubuntu server:
+
+1.  **Install Docker:** Ensure Docker is installed (the server currently runs Docker 29.7.2 on Ubuntu 22.04.5 LTS).
+2.  **SSH Access:** Ensure the `SERVER_USER` has the corresponding public key in `~/.ssh/authorized_keys`.
+3.  **Directory Structure:** Create the deployment directories:
+    ```bash
+    mkdir -p /opt/trinetra/data/cases
+    ```
+4.  **Environment Variables:** Create the production `.env` file on the server. **It must never be committed to GitHub. Real API keys and APP_SECRET must never appear in the repository or workflow files.**
+    ```bash
+    nano /opt/trinetra/.env
+    ```
+    Populate it with your actual production variables like `GROQ_API_KEY` and `APP_SECRET`. Note: `APP_CORS_ORIGINS` will be updated once the actual frontend production URL is known.
+
+## G. Deployment Flow
+
+When a developer pushes to the `main` branch:
+
+1.  **CI Validation:** The `Backend CI` workflow runs to ensure dependencies install and the app imports correctly.
+2.  **Docker Build & Push:** The `Backend Deploy` workflow builds the Docker image and pushes it to GHCR with `latest` and `sha` tags.
+3.  **SSH Deployment:** The workflow connects to your Ubuntu server via SSH.
+4.  **Update Container:** It pulls the exact commit image (`sha-<commit>`), stops and removes the old `trinetra-backend` container, and starts the new one, mounting `/opt/trinetra/data` to `/app/data`.
+5.  **Health Check & Rollback:** It polls `http://localhost:8000/health` for up to 60 seconds. If it fails, the new container is removed and the previous container image is automatically restored to ensure zero prolonged downtime.
+
+## H. Rollback
+
+Because images are tagged by commit SHA, rollback is straightforward:
+
+1.  Identify the desired previous image tag from GHCR (e.g., `sha-old123`).
+2.  SSH into your server.
+3.  Stop the current container:
+    ```bash
+    docker stop trinetra-backend
+    docker rm trinetra-backend
+    ```
+4.  Start the previous image:
+    ```bash
+    docker run -d --name trinetra-backend --restart unless-stopped -p 8000:8000 -v /opt/trinetra/data:/app/data --env-file /opt/trinetra/.env ghcr.io/<owner>/<repository>-backend:sha-old123
+    ```
+5.  Verify health:
+    ```bash
+    curl http://localhost:8000/health
+    ```
+
+## I. Troubleshooting
+
+If the deployment fails or the backend is unresponsive, SSH into the server and use these commands:
+
+*   **Check container status:** `docker ps -a`
+*   **View application logs:** `docker logs trinetra-backend`
+*   **Inspect container details:** `docker inspect trinetra-backend`
+*   **Manual health check:** `curl http://localhost:8000/health`
+*   **List local images:** `docker images`
+
+**Common Issues:**
+*   **Container exits immediately:** Check logs (`docker logs trinetra-backend`). Usually due to missing environment variables or a syntax error.
+*   **GHCR Authentication Failure:** Ensure the GitHub Actions `GITHUB_TOKEN` has `packages: write` permissions.
+*   **Port Conflict:** Ensure port 8000 is not being used by another application.
+*   **CORS Errors:** Verify `APP_CORS_ORIGINS` in `/opt/trinetra/.env` matches your production frontend domain (once known).
