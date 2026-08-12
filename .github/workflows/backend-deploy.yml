@@ -90,6 +90,8 @@ jobs:
             # Ensure the deployment data directory exists
             mkdir -p /opt/trinetra/data
             mkdir -p /opt/trinetra/data/cases
+            # The container runs as appuser (UID/GID 999)
+            chown -R 999:999 /opt/trinetra/data
             
             # Start the new container
             docker run -d \
