@@ -182,7 +182,7 @@ export function FusedSection() {
         </div>
 
         <div className="flex-1 overflow-auto">
-          {pipeline && (pipeline.status === "PARSING" || pipeline.status === "FUSING" || (!isFusedReady && isProcessing)) ? (
+          {pipeline && !isFusedReady && isProcessing ? (
             <div className="flex h-full flex-col items-center justify-center space-y-4">
               <Loader2 className="size-8 text-cyan-500 animate-spin" />
               <p className="text-cyan-500 font-medium text-base">
@@ -192,6 +192,7 @@ export function FusedSection() {
                 Unifying transaction logs with telecom CDR and IPDR sessions. Fused dataset will appear automatically when ready.
               </p>
             </div>
+
 
           ) : warmupError ? (
             <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center text-muted-foreground">

@@ -747,28 +747,21 @@ def cached_fraud_heat(bundle: dict) -> dict:
     hit = _fusion_cache.get(key)
     if hit is not None:
         return hit
-        
+    result = fraud_heat(bundle)
     with _fusion_cache_lock:
-        hit = _fusion_cache.get(key)
-        if hit is not None:
-            return hit
-        result = fraud_heat(bundle)
         _fusion_cache[key] = result
-        return result
+    return result
 
 def cached_build_timeline(bundle: dict) -> list[dict]:
     key = ("build_timeline", _fingerprint(bundle))
     hit = _fusion_cache.get(key)
     if hit is not None:
         return hit
-        
+    result = build_timeline(bundle)
     with _fusion_cache_lock:
-        hit = _fusion_cache.get(key)
-        if hit is not None:
-            return hit
-        result = build_timeline(bundle)
         _fusion_cache[key] = result
-        return result
+    return result
+
 
 def clear_fusion_cache() -> None:
     with _fusion_cache_lock:
