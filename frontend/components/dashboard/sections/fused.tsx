@@ -17,7 +17,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
-import { api, type FusedRow } from "@/lib/api";
+import { api, isPipelineNotReady, isNoDataLoaded, isNetworkOrWarmupError, type FusedRow } from "@/lib/api";
+import { usePipeline } from "@/lib/pipeline-context";
 
 const PAGE_SIZE = 50;
 
@@ -30,6 +31,7 @@ const riskStyle = (score: number) => {
 };
 
 export function FusedSection() {
+  const { pipeline, isFusedReady, isProcessing } = usePipeline();
   const [rows, setRows] = useState<FusedRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -38,8 +40,7 @@ export function FusedSection() {
   const [mode, setMode] = useState("all");
   const [riskAnnotate, setRiskAnnotate] = useState(true);
   const [fusedLoading, setFusedLoading] = useState(true);
-  const [fusedKey, setFusedKey] = useState(0);
-  const [pipelineState, setPipelineState] = useState<any>(null);
+  const [warmupError, setWarmupError] = useState(false);
 
   const [selectedRow, setSelectedRow] = useState<FusedRow | null>(null);
   const [copied, setCopied] = useState(false);
@@ -48,6 +49,7 @@ export function FusedSection() {
 
   const loadFused = useCallback(() => {
     setFusedLoading(true);
+    setWarmupError(false);
     api
       .fused(offset, PAGE_SIZE, q, account, mode, riskAnnotate)
       .then((res) => {
@@ -55,43 +57,28 @@ export function FusedSection() {
         setTotal(res.total ?? 0);
       })
       .catch((error) => {
-        const err = error as { status?: number };
-        if (err.status !== 409 && err.status !== 425 && err.status !== 401) {
-          toast.error("Failed to load fused records. Is the backend running?");
-        }
         setRows([]);
         setTotal(0);
+        if (isPipelineNotReady(error) || isNoDataLoaded(error)) {
+          return;
+        }
+        if (isNetworkOrWarmupError(error)) {
+          setWarmupError(true);
+          return;
+        }
+        toast.error("Failed to load fused records.");
       })
       .finally(() => setFusedLoading(false));
-  }, [offset, q, account, riskAnnotate]);
+  }, [offset, q, account, mode, riskAnnotate]);
 
   useEffect(() => {
-    let t: any;
-    let isActive = true;
-    const poll = async () => {
-      try {
-        const ps = await api.pipelineStatus();
-        if (!isActive) return;
-        setPipelineState(ps);
-        if (ps && !ps.ready && ps.status !== "IDLE" && ps.status !== "ERROR") {
-           t = setTimeout(poll, 2500);
-        }
-      } catch (e) { }
-    };
-    poll();
-    return () => { isActive = false; clearTimeout(t); };
-  }, [fusedKey]);
+    if (isFusedReady) {
+      loadFused();
+    } else if (!isProcessing) {
+      loadFused();
+    }
+  }, [isFusedReady, isProcessing, loadFused]);
 
-  useEffect(() => {
-    if (!pipelineState) {
-        return;
-    }
-    // PARSING and FUSING: no fused data yet, don't load
-    // FUSED_READY and beyond: fused data is available, load immediately
-    if (pipelineState.status !== "PARSING" && pipelineState.status !== "FUSING") {
-        loadFused();
-    }
-  }, [pipelineState?.status, loadFused]);
 
   const downloadFusedCsv = async () => {
     try {
@@ -189,28 +176,34 @@ export function FusedSection() {
               <SelectItem value="atm">ATM</SelectItem>
             </SelectContent>
           </Select>
-          <Button size="sm" variant="secondary" onClick={() => { setOffset(0); setFusedKey((k) => k + 1); }}>
+          <Button size="sm" variant="secondary" onClick={() => { setOffset(0); loadFused(); }}>
             Apply
           </Button>
         </div>
 
         <div className="flex-1 overflow-auto">
-          {pipelineState && (pipelineState.status === "PARSING" || pipelineState.status === "FUSING") ? (
+          {pipeline && (pipeline.status === "PARSING" || pipeline.status === "FUSING" || (!isFusedReady && isProcessing)) ? (
             <div className="flex h-full flex-col items-center justify-center space-y-4">
               <Loader2 className="size-8 text-cyan-500 animate-spin" />
               <p className="text-cyan-500 font-medium">
-                {pipelineState.status === "PARSING" ? "Parsing & Normalizing..." : "Fusing Datasets..."} {pipelineState.progress}%
+                {pipeline.status === "PARSING" ? "Parsing & Normalizing..." : "Fusing Datasets..."} {pipeline.progress}%
               </p>
               <p className="text-muted-foreground text-sm max-w-sm text-center">
-                Processing unstructured data into canonical schema. 
-                The dataset will appear momentarily.
+                Unifying transaction logs with telecom CDR and IPDR sessions. The dataset will appear automatically.
               </p>
+            </div>
+          ) : warmupError ? (
+            <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center text-muted-foreground">
+              <Loader2 className="size-6 text-amber-400 animate-spin" />
+              <p className="text-amber-400 font-medium">Connecting to investigation backend...</p>
+              <p className="text-xs">Render service warming up. Retrying automatically.</p>
             </div>
           ) : fusedLoading ? (
             <div className="p-8 text-center text-muted-foreground animate-pulse">Loading fused records...</div>
           ) : rows.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground">No fused records. Ingest bank + CDR + IPDR datasets first.</div>
           ) : (
+
             <table className="w-full text-sm">
               <thead className="sticky top-0 z-10 bg-muted/60 text-muted-foreground">
                 <tr>

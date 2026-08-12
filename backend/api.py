@@ -47,7 +47,29 @@ _log = config.log
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start with a fresh state on every restart."""
+    """Restore persisted bundle on backend startup if present."""
+    _log.info("[AUTH] Storage database path resolved to: %s", store._db_path().resolve())
+    try:
+
+        bundle = store.load_bundle()
+        if bundle and (bundle.get("bank") or bundle.get("cdr") or bundle.get("ipdr")):
+            with _lock:
+                _state["bundle"] = bundle
+            copilot_router.learn_bundle(bundle)
+            _pipeline.update({
+                "status": "READY",
+                "progress": 100,
+                "ready": True,
+                "fused_ready": True,
+                "anomalies_ready": True,
+                "graphs_ready": True,
+                "dataset_id": "restored",
+                "error": None,
+            })
+            _run_pipeline_background(bundle)
+            _log.info("Restored persisted bundle from store on startup")
+    except Exception as e:
+        _log.warning("Failed to restore bundle on startup: %s", e)
     yield
 
 
@@ -59,9 +81,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cors_list = config.cors_origins()
+allow_origins_cfg = cors_list if "*" not in cors_list else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.cors_origins(),
+    allow_origins=allow_origins_cfg,
+    allow_credentials=False if "*" in allow_origins_cfg else True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -69,12 +95,24 @@ app.add_middleware(
 app.include_router(copilot_router.router)
 # Force reload for copilot and cache locks
 _state: dict = {}
-_pipeline: dict = {"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None}
+_pipeline: dict = {
+    "status": "IDLE",
+    "progress": 0,
+    "ready": False,
+    "fused_ready": False,
+    "anomalies_ready": False,
+    "graphs_ready": False,
+    "dataset_id": None,
+    "error": None,
+}
 _lock = threading.Lock()
 
 
 def _persist() -> None:
-    pass
+    b = _state.get("bundle")
+    if b:
+        store.save_bundle(b)
+
 
 
 class IngestRequest(BaseModel):
@@ -118,9 +156,10 @@ def health():
 def auth_register(body: auth.RegisterBody):
     """Create an account (first registered user becomes admin).
     Wipes all loaded data so the new user starts with a clean slate."""
-    user = auth.register(body)
+    res = auth.register(body)
     wipe_all_data(reason=f"register:{body.username}")
-    return {"detail": "user created", "user": user}
+    return res
+
 
 
 @app.post("/auth/login")
@@ -140,8 +179,18 @@ def wipe_all_data(reason: str = "manual") -> None:
     with _lock:
         _state.pop("bundle", None)
         _state.pop("hybrid_warm", None)
-        _pipeline.update({"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None})
+        _pipeline.update({
+            "status": "IDLE",
+            "progress": 0,
+            "ready": False,
+            "fused_ready": False,
+            "anomalies_ready": False,
+            "graphs_ready": False,
+            "dataset_id": None,
+            "error": None,
+        })
     copilot_router.reset_engine()
+
     risk.clear_cache()
     risk.clear_hybrid_cache()
     clear_fusion_cache()
@@ -227,6 +276,18 @@ def ingest(req: IngestRequest, user: dict = Depends(auth.require_user)) -> Inges
     
     folder_str = str(requested_path)
     _log.info("ingesting folder %s", folder_str)
+    import uuid
+    ds_id = str(uuid.uuid4())
+    _pipeline.update({
+        "dataset_id": ds_id,
+        "status": "PARSING",
+        "progress": 10,
+        "ready": False,
+        "fused_ready": False,
+        "anomalies_ready": False,
+        "graphs_ready": False,
+        "error": None,
+    })
     with _lock:
         _state["bundle"] = ingest_folder(folder_str)
         _persist()
@@ -235,15 +296,11 @@ def ingest(req: IngestRequest, user: dict = Depends(auth.require_user)) -> Inges
     risk.clear_hybrid_cache()
     clear_fusion_cache()
     clear_report_cache()
-    
-    import uuid
-    _pipeline["dataset_id"] = str(uuid.uuid4())
-    _pipeline["status"] = "PARSING"
-    _pipeline["progress"] = 10
-    _pipeline["ready"] = False
+    clear_graph_cache()
     
     _run_pipeline_background(_state["bundle"])
     b = _state["bundle"]
+
     copilot_router.learn_bundle(b)
     _log.info("ingest done: %d files ok, %d skipped, %d errors | bank=%d cdr=%d ipdr=%d",
               len(b["files"]["ok"]), len(b["files"]["skipped"]),
@@ -475,44 +532,73 @@ def _run_pipeline_background(bundle: dict) -> None:
             from backend.graphs import cached_money_graph, cached_account_phone_graph, cached_phone_call_graph
             import backend.risk.hybrid as hybrid
             
-            _pipeline["status"] = "FUSING"
-            _pipeline["progress"] = 25
+            _pipeline.update({
+                "status": "FUSING",
+                "progress": 25,
+                "fused_ready": False,
+                "anomalies_ready": False,
+                "graphs_ready": False,
+                "ready": False,
+                "error": None,
+            })
             _log.info("[PIPELINE] dataset=%s stage=FUSING progress=25", ds_id)
             cached_fused_base(bundle)
             cached_build_timeline(bundle)
             
             # Fused data is ready — page can now render without waiting for ML
-            _pipeline["status"] = "FUSED_READY"
-            _pipeline["progress"] = 40
+            _pipeline.update({
+                "status": "FUSED_READY",
+                "progress": 40,
+                "fused_ready": True,
+            })
             _log.info("[PIPELINE] dataset=%s stage=FUSED_READY progress=40 elapsed=%.2fs", ds_id, time.time() - t0)
             
-            _pipeline["status"] = "SCORING"
-            _pipeline["progress"] = 50
+            _pipeline.update({
+                "status": "SCORING",
+                "progress": 50,
+            })
             _log.info("[PIPELINE] dataset=%s stage=SCORING progress=50", ds_id)
             hybrid.hybrid_analyze(bundle)
             
-            _pipeline["status"] = "GRAPHS"
-            _pipeline["progress"] = 85
+            _pipeline.update({
+                "status": "ANOMALIES_READY",
+                "progress": 75,
+                "anomalies_ready": True,
+            })
+            _log.info("[PIPELINE] dataset=%s stage=ANOMALIES_READY progress=75 elapsed=%.2fs", ds_id, time.time() - t0)
+            
+            _pipeline.update({
+                "status": "GRAPHS",
+                "progress": 85,
+            })
             _log.info("[PIPELINE] dataset=%s stage=GRAPHS progress=85", ds_id)
             cached_money_graph(bundle)
             cached_account_phone_graph(bundle)
             cached_phone_call_graph(bundle)
             
-            _pipeline["status"] = "READY"
-            _pipeline["progress"] = 100
-            _pipeline["ready"] = True
+            _pipeline.update({
+                "status": "READY",
+                "progress": 100,
+                "graphs_ready": True,
+                "ready": True,
+            })
             _log.info("[PIPELINE] dataset=%s stage=READY progress=100 total_elapsed=%.2fs", ds_id, time.time() - t0)
             
             _state["hybrid_warm"] = True
             _log.info("hybrid engine warmed (%d txns)", len(bundle.get("bank", [])))
-        except Exception:
+        except Exception as e:
             _state["hybrid_warm"] = False
-            _pipeline["status"] = "ERROR"
-            _log.exception("[PIPELINE] dataset=%s stage=ERROR pipeline execution failed", ds_id)
+            _pipeline.update({
+                "status": "ERROR",
+                "ready": False,
+                "error": str(e),
+            })
+            _log.exception("[PIPELINE] dataset=%s stage=ERROR pipeline execution failed: %s", ds_id, e)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return
+
 
 
 def _enrich_txn_row(row: dict, bank_by_id: dict) -> dict:
@@ -829,6 +915,18 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
                              user: dict = Depends(auth.require_user)):
     if not files:
         raise HTTPException(400, "no files uploaded")
+    import uuid
+    ds_id = str(uuid.uuid4())
+    _pipeline.update({
+        "dataset_id": ds_id,
+        "status": "PARSING",
+        "progress": 10,
+        "ready": False,
+        "fused_ready": False,
+        "anomalies_ready": False,
+        "graphs_ready": False,
+        "error": None,
+    })
     tmp = tempfile.mkdtemp(prefix="backend_upload_")
     names: list[str] = []
     for f in files:
@@ -849,12 +947,7 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
     risk.clear_hybrid_cache()
     clear_fusion_cache()
     clear_report_cache()
-    
-    import uuid
-    _pipeline["dataset_id"] = str(uuid.uuid4())
-    _pipeline["status"] = "PARSING"
-    _pipeline["progress"] = 10
-    _pipeline["ready"] = False
+    clear_graph_cache()
     
     _run_pipeline_background(_state["bundle"])
     b = _state["bundle"]
@@ -867,6 +960,7 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
         "bank": len(b["bank"]), "cdr": len(b["cdr"]), "ipdr": len(b["ipdr"]),
         "complaints": len(b["complaints"]),
     }
+
 
 
 @app.get("/scoring/alerts")
@@ -882,13 +976,19 @@ def scoring_alerts(min_risk: float = Query(50, ge=0, le=100),
     b = _require_bundle()
     if not b.get("bank"):
         return {"results": [], "total": 0}
+    if not _pipeline.get("anomalies_ready") and _pipeline.get("status") in ("PARSING", "FUSING", "SCORING") and _pipeline.get("dataset_id"):
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     ncrp_accounts = {str(c.get("account_no") or "").strip()
                      for c in b.get("complaints", [])}
     ncrp_accounts.discard("")
     bank_by_id = {r.get("txn_id"): r for r in b.get("bank", [])}
     res = risk.hybrid_analyze_fast(b)
     if res is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
+        if _pipeline.get("anomalies_ready") or _pipeline.get("ready"):
+            res = risk.hybrid_analyze(b)
+        else:
+            raise HTTPException(425, "Anomaly detection engine is still warming up.")
+
     scored_sorted = res["transactions_sorted"]
     results = []
     for orig_s in scored_sorted:
@@ -967,15 +1067,16 @@ def fused_data(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=10
     (expensive on large bundles — runs the full scoring engine once).
     """
     b = _require_bundle()
-    if _pipeline.get("status") in ("PARSING", "FUSING") and _pipeline.get("dataset_id"):
+    if not _pipeline.get("fused_ready") and _pipeline.get("status") in ("PARSING", "FUSING") and _pipeline.get("dataset_id"):
         raise HTTPException(425, "Fusion dataset is being prepared.")
     scored = None
     if risk_annotate:
         res = risk.hybrid_analyze_fast(b)
         if res:
-            scored = res["transactions"]
+            scored = res.get("transactions")
     return fused_table(b, offset=offset, limit=limit, q=q,
                        account=account, mode=mode, scored=scored)
+
 
 
 @app.get("/data/fused.csv")

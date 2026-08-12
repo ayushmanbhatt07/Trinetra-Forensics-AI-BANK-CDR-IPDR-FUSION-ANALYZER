@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { api } from "@/lib/api";
+import { usePipeline } from "@/lib/pipeline-context";
 
 export function IngestionSection() {
+  const { refetchPipeline } = usePipeline();
   const [files, setFiles] = useState<File[]>([]);
   const [folder, setFolder] = useState("");
   const [isUploading, setIsUploading] = useState(false);
@@ -34,7 +36,8 @@ export function IngestionSection() {
     setIsUploading(true);
     try {
       const data = await api.uploadFiles(files);
-      toast.success(`Fusion Complete! Scored ${data.files.length} datasets (${data.bank} bank, ${data.cdr} CDR, ${data.ipdr} IPDR records, ${data.complaints} complaints).`);
+      await refetchPipeline();
+      toast.success(`Ingestion started! Parsing ${data.files.length} datasets.`);
       if (data.errors.length > 0) {
         toast.error(`Skipped ${data.skipped.length} files · errors: ${data.errors.join("; ").slice(0, 200)}`);
       }
@@ -55,6 +58,7 @@ export function IngestionSection() {
     setIsFolderIngesting(true);
     try {
       const data = await api.ingestFolder(folder.trim());
+      await refetchPipeline();
       toast.success(`Folder ingested: ${data.files_ok} files ok`);
       if (data.errors.length) toast.error(`Errors: ${data.errors.slice(0, 3).join("; ")}`);
       window.dispatchEvent(new CustomEvent("nav:section", { detail: "fused" }));
@@ -64,6 +68,7 @@ export function IngestionSection() {
       setIsFolderIngesting(false);
     }
   };
+
 
   return (
     <div className="space-y-6">

@@ -98,7 +98,11 @@ export interface PipelineStatus {
   status: string;
   progress: number;
   ready: boolean;
+  fused_ready?: boolean;
+  anomalies_ready?: boolean;
+  graphs_ready?: boolean;
   dataset_id: string | null;
+  error?: string | null;
 }
 
 /**
@@ -135,6 +139,18 @@ export class ApiError extends Error {
   }
 }
 
+export function isPipelineNotReady(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 425;
+}
+
+export function isNoDataLoaded(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 409;
+}
+
+export function isNetworkOrWarmupError(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 0 || err.status === 503);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {};
   const token = bearerToken();
@@ -142,24 +158,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!(init?.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
-  const res = await fetch(apiBaseUrl() + path, { ...init, headers });
-  if (!res.ok) {
-    if (res.status === 409) {
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("api:409"));
+  try {
+    const res = await fetch(apiBaseUrl() + path, { ...init, headers });
+    if (!res.ok) {
+      if (res.status === 409) {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("api:409"));
+        }
       }
+      let detail = `HTTP ${res.status}`;
+      try {
+        const body = await res.json();
+        detail = body.detail || detail;
+      } catch {
+        /* keep default */
+      }
+      throw new ApiError(res.status, detail);
     }
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* keep default */
-    }
-    throw new ApiError(res.status, detail);
+    return (await res.json()) as T;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw new ApiError(0, err instanceof Error ? err.message : "Backend unreachable / warming up");
   }
-  return (await res.json()) as T;
 }
+
 
 export interface IngestStatus {
   loaded: boolean;
@@ -748,10 +770,11 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   register: (username: string, password: string) =>
-    request<{ detail: string; user: { username: string; role: string } }>("/auth/register", {
+    request<AuthResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+
   me: () => request<{ user: { username: string; role: string } }>("/auth/me"),
   health: () => request<{ status: string; loaded: boolean; last_ingested: string | null }>("/health"),
   status: () => request<IngestStatus>("/ingest/status"),

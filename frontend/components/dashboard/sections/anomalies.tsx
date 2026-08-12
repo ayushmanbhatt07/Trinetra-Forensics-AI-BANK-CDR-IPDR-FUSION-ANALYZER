@@ -5,7 +5,8 @@
  * Full-width alert table, row click = blurred background + centralized
  * explainability card with STR generation.
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+
 import {
   ShieldAlert, FileText, X, Activity, Database,
   Download, AlertTriangle, Check, Copy, PhoneCall, Loader2
@@ -16,7 +17,8 @@ import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
-import { api, type Alert } from "@/lib/api";
+import { api, isPipelineNotReady, isNoDataLoaded, isNetworkOrWarmupError, type Alert } from "@/lib/api";
+import { usePipeline } from "@/lib/pipeline-context";
 
 const riskStyle = (score: number) => {
   if (score >= 86) return { color: "#f43f5e", bg: "bg-rose-500/10 border-rose-500/40" };
@@ -27,14 +29,15 @@ const riskStyle = (score: number) => {
 };
 
 export function AnomaliesSection() {
+  const { pipeline, isAnomaliesReady, isProcessing } = usePipeline();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(true);
+  const [warmupError, setWarmupError] = useState(false);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
   const [panelPayload, setPanelPayload] = useState<any>(null);
   const [panelBusy, setPanelBusy] = useState(false);
-  const [pipelineState, setPipelineState] = useState<any>(null);
 
   const openDossier = async (kind: string, value: string) => {
     if (!value) return;
@@ -43,58 +46,40 @@ export function AnomaliesSection() {
       const info = await api.dossier(kind, value);
       setPanelPayload({ type: "entity", info });
     } catch (e: any) {
-      if (e.status !== 409) toast.error(`No dossier found for ${kind} ${value}`);
+      if (!isNoDataLoaded(e)) toast.error(`No dossier found for ${kind} ${value}`);
     } finally {
       setPanelBusy(false);
     }
   };
 
-  useEffect(() => {
-    let mounted = true;
-    let timeoutId: number | undefined;
-
-    const fetchAlerts = () => {
-      api.alerts(50, 200)
-        .then((res) => {
-          if (!mounted) return;
-          setAlerts(res.results || []);
-          setAlertsLoading(false);
-        })
-        .catch((error) => {
-          if (!mounted) return;
-          const err = error as { status?: number };
-          if (err.status !== 409 && err.status !== 425 && err.status !== 401) {
-            toast.error("Failed to load anomaly alerts. Is the backend running?");
-          }
-          setAlertsLoading(false);
-        });
-    };
-
-    const checkPipeline = async () => {
-      try {
-        const ps = await api.pipelineStatus();
-        if (!mounted) return;
-        setPipelineState(ps);
-        
-        if (ps && !ps.ready && ps.status !== "IDLE" && ps.status !== "ERROR") {
-           timeoutId = window.setTimeout(checkPipeline, 2500);
-        } else {
-           fetchAlerts();
-        }
-      } catch (e) {
-        if (!mounted) return;
-        fetchAlerts();
-      }
-    };
-    
+  const fetchAlerts = useCallback(() => {
     setAlertsLoading(true);
-    checkPipeline();
-
-    return () => {
-      mounted = false;
-      if (timeoutId !== undefined) clearTimeout(timeoutId);
-    };
+    setWarmupError(false);
+    api.alerts(50, 200)
+      .then((res) => {
+        setAlerts(res.results || []);
+      })
+      .catch((error) => {
+        setAlerts([]);
+        if (isPipelineNotReady(error) || isNoDataLoaded(error)) {
+          return;
+        }
+        if (isNetworkOrWarmupError(error)) {
+          setWarmupError(true);
+          return;
+        }
+        toast.error("Failed to load anomaly alerts.");
+      })
+      .finally(() => setAlertsLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (isAnomaliesReady) {
+      fetchAlerts();
+    } else if (!isProcessing) {
+      fetchAlerts();
+    }
+  }, [isAnomaliesReady, isProcessing, fetchAlerts]);
 
   const downloadSTR = async () => {
     try {
@@ -118,34 +103,40 @@ export function AnomaliesSection() {
     <div className="space-y-6 h-[calc(100vh-12rem)]">
       <div className="flex h-full flex-col rounded-xl border border-border/70 bg-card/60 backdrop-blur">
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-          <ShieldAlert className="size-5 text-red-500" />
-          <div className="min-w-[200px] flex-1">
-            <p className="text-sm font-semibold text-red-500">Anomaly Detection Feed</p>
-            <p className="text-xs text-muted-foreground">
-              {alerts.length} highest-risk transactions · click a row for full explainability + STR
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={downloadSTR}>
+          <Badge variant="outline" className="border-rose-500/40 text-rose-400 bg-rose-500/10">
+            <ShieldAlert className="mr-1 size-3.5" /> High Risk Feed ({alerts.length})
+          </Badge>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="bg-red-600 text-white hover:bg-red-700 border-none"
+              onClick={downloadSTR}
+            >
               <FileText className="mr-1 size-4" /> STR
             </Button>
           </div>
         </div>
 
         <div className="flex-1 overflow-auto">
-          {pipelineState && !pipelineState.ready ? (
+          {pipeline && !isAnomaliesReady && isProcessing ? (
             <div className="flex h-full flex-col items-center justify-center space-y-4">
-              <Loader2 className="size-8 text-red-500 animate-spin" />
-              <p className="text-red-500 font-medium">
-                {pipelineState.status === "PARSING" ? "Parsing & Normalizing" : 
-                 pipelineState.status === "FUSING" ? "Fusing Datasets" :
-                 pipelineState.status === "SCORING" ? "AI Risk Scoring" :
-                 pipelineState.status === "GRAPHS" ? "Building Network Graphs" : "Finalizing"}... {pipelineState.progress}%
+              <Loader2 className="size-8 text-rose-500 animate-spin" />
+              <p className="text-rose-500 font-medium">
+                {pipeline.status === "PARSING" ? "Parsing & Normalizing" : 
+                 pipeline.status === "FUSING" ? "Fusing Datasets" :
+                 pipeline.status === "SCORING" ? "AI Risk Scoring" : "Building Analytics"}... {pipeline.progress}%
               </p>
               <p className="text-muted-foreground text-sm max-w-sm text-center">
                 Computing behavioral profiles and fraud heat.
                 Anomalies will be available when scoring completes.
               </p>
+            </div>
+          ) : warmupError ? (
+            <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center text-muted-foreground">
+              <Loader2 className="size-6 text-amber-400 animate-spin" />
+              <p className="text-amber-400 font-medium">Connecting to investigation backend...</p>
+              <p className="text-xs">Render service warming up. Retrying automatically.</p>
             </div>
           ) : alertsLoading ? (
             <div className="p-8 text-center text-muted-foreground animate-pulse">Loading anomalies...</div>

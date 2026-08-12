@@ -81,7 +81,11 @@ def case_dir() -> Path:
 
 
 def cors_origins() -> list[str]:
-    return [o.strip() for o in _get("CORS_ORIGINS").split(",") if o.strip()]
+    raw = _get("CORS_ORIGINS", "")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if not origins:
+        return ["*"]
+    return origins
 
 
 def api_host() -> str:

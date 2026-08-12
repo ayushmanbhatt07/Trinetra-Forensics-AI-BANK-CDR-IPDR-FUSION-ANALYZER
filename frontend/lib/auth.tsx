@@ -92,11 +92,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const register = useCallback(
     async (username: string, password: string) => {
-      await api.register(username, password);
-      return login(username, password);
+      const res = await api.register(username, password);
+      window.localStorage.setItem(TOKEN_KEY, res.access_token);
+      window.localStorage.setItem(USER_KEY, JSON.stringify(res.user));
+      setToken(res.access_token);
+      setUser(res.user);
+      return res.user;
     },
-    [login]
+    []
   );
+
 
   const logout = useCallback(() => {
     // Session reset: tell the backend to drop the loaded (transient) data so

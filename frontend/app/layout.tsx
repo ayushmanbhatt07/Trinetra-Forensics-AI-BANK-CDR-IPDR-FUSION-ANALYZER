@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/lib/auth";
+import { PipelineProvider } from "@/lib/pipeline-context";
 import { Toaster } from "@/components/ui/sonner";
 import { GalaxyStarsBackground } from "@/components/ui/galaxy-stars";
 import { OmniWidget } from "@/components/omni/omni-widget";
@@ -51,8 +52,10 @@ export default function RootLayout({
           />
           <div className="relative z-10">
             <AuthProvider>
-              {children}
-              <OmniWidget />
+              <PipelineProvider>
+                {children}
+                <OmniWidget />
+              </PipelineProvider>
             </AuthProvider>
           </div>
           <Toaster richColors position="top-right" />
@@ -61,3 +64,4 @@ export default function RootLayout({
     </html>
   );
 }
+

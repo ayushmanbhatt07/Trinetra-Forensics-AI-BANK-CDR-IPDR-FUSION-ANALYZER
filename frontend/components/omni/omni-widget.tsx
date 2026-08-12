@@ -18,6 +18,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { api, type CopilotQueryResult } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { usePipeline } from "@/lib/pipeline-context";
+
 import { OmniEye } from "./omni-eye";
 import { EyeSpinner } from "./eye-spinner";
 import { InvestigationGraph } from "./investigation-graph";
@@ -63,32 +65,20 @@ export function OmniWidget() {
   const pathname = usePathname();
   const [isIngested, setIsIngested] = useState(false);
   const { user } = useAuth();
+  const { pipeline, isFusedReady, isReady } = usePipeline();
 
   useEffect(() => {
-    let mounted = true;
-    const checkStatus = () => {
-      if (!user) return;
-      api.status()
-        .then(res => {
-          if (mounted) {
-            setIsIngested(res.loaded);
-            if (res.loaded) {
-              import("@/components/dashboard/sections/reports").then(m => m.prefetchReports().catch(()=>{}));
-            }
-          }
-        })
-        .catch(() => {
-          if (mounted) setIsIngested(false);
-        });
-    };
+    if (!user) {
+      setIsIngested(false);
+      return;
+    }
+    const ingested = Boolean(pipeline?.dataset_id || isFusedReady || isReady);
+    setIsIngested(ingested);
+    if (ingested) {
+      import("@/components/dashboard/sections/reports").then((m) => m.prefetchReports().catch(() => {}));
+    }
+  }, [user, pipeline?.dataset_id, isFusedReady, isReady]);
 
-    checkStatus();
-    const interval = setInterval(checkStatus, 5000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
-  }, [user?.username]);
 
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([

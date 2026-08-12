@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { FlipKpiCard } from "@/components/ui/flip-card";
 import { Database, ShieldAlert, Users, Target, FileText, PhoneCall, Banknote, Activity, Network } from "lucide-react";
-import { api, type Summary, type CopilotStats } from "@/lib/api";
+import { api, isNoDataLoaded, isPipelineNotReady, isNetworkOrWarmupError, type Summary, type CopilotStats } from "@/lib/api";
 import { toast } from "sonner";
 
 export function OverviewSection() {
@@ -16,12 +16,15 @@ export function OverviewSection() {
       .summary()
       .then(setSummary)
       .catch((e) => {
-        if (e.status !== 409) toast.error("Backend unreachable. Is the API running?");
+        if (!isNoDataLoaded(e) && !isPipelineNotReady(e) && !isNetworkOrWarmupError(e)) {
+          toast.error("Failed to load investigation overview.");
+        }
       })
       .finally(() => setLoading(false));
   };
 
   useEffect(load, []);
+
 
   useEffect(() => {
     if (!summary) return;

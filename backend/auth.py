@@ -43,32 +43,36 @@ _csrf_lock = threading.Lock()
 
 
 def _secret() -> bytes:
-    """Return the signing secret (env first, else a persisted random key)."""
+    """Return the signing secret (from APP_SECRET env var or persisted key_file)."""
     env = os.environ.get("APP_SECRET")
-    if env:
+    if env and env != "replace-with-a-long-random-string-in-production":
         return env.encode()
     key_file = store._db_path().parent / "auth_secret.key"
     if key_file.exists():
         return key_file.read_bytes()
     key = secrets.token_bytes(32)
-    key_file.write_bytes(key)
-    config.log.warning(
-        "APP_SECRET not set; generated ephemeral signing key at %s "
-        "(tokens invalidate if the file is removed)", key_file)
+    try:
+        key_file.write_bytes(key)
+        config.log.warning(
+            "[AUTH] APP_SECRET environment variable not set; generated secure random signing key at %s", key_file)
+    except Exception as err:
+        config.log.error("[AUTH] Failed to write auth_secret.key: %s", err)
     return key
+
 
 
 def _db() -> sqlite3.Connection:
     conn = store._connect()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username      TEXT PRIMARY KEY,
-            password_hash TEXT NOT NULL,
-            salt          TEXT NOT NULL,
-            role          TEXT NOT NULL DEFAULT 'officer',
-            created       TEXT NOT NULL
-        )
-    """)
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username      TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                salt          TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'officer',
+                created       TEXT NOT NULL
+            )
+        """)
     return conn
 
 
@@ -97,18 +101,21 @@ def create_user(username: str, password: str, role: str = "officer") -> dict:
     try:
         with conn:
             row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
-            if row[0] == 0:
+            if row and row[0] == 0:
                 role = "admin"
             conn.execute(
                 "INSERT INTO users(username, password_hash, salt, role, created)"
                 " VALUES(?,?,?,?,?)",
                 (username, digest, salt, role,
                  datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            conn.commit()
     except sqlite3.IntegrityError:
         raise HTTPException(409, "username already exists")
     finally:
         conn.close()
+    config.log.info("[AUTH] user created: username=%s role=%s", username, role)
     return {"username": username, "role": role}
+
 
 
 def verify_user(username: str, password: str) -> dict | None:
@@ -218,7 +225,15 @@ class LoginBody(BaseModel):
 def register(body: RegisterBody) -> dict:
     if not config.allow_signup():
         raise HTTPException(403, "public sign-up is disabled on this server")
-    return create_user(body.username, body.password)
+    user = create_user(body.username, body.password)
+    token = issue_token(user["username"], user["role"])
+    config.log.info("[AUTH] registration complete: username=%s role=%s", user["username"], user["role"])
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": user,
+    }
+
 
 
 def login(body: LoginBody) -> dict:
