@@ -1,0 +1,268 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(0.12 0.00 0);
+  --foreground: oklch(0.95 0.00 0);
+  --card: oklch(0.14 0.00 0);
+  --card-foreground: oklch(0.95 0.00 0);
+  --popover: oklch(0.14 0.00 0);
+  --popover-foreground: oklch(0.95 0.00 0);
+  --primary: oklch(0.7 0.1 230);
+  --primary-foreground: oklch(0.1 0.00 0);
+  --secondary: oklch(0.18 0.00 0);
+  --secondary-foreground: oklch(0.95 0.00 0);
+  --muted: oklch(0.18 0.00 0);
+  --muted-foreground: oklch(0.65 0.00 0);
+  --accent: oklch(0.7 0.1 230);
+  --accent-foreground: oklch(0.1 0.00 0);
+  --destructive: oklch(0.65 0.2 25);
+  --destructive-foreground: oklch(0.95 0 0);
+  --border: transparent;
+  --input: oklch(0.2 0.00 0);
+  --ring: oklch(0.7 0.1 230);
+  --chart-1: oklch(0.7 0.1 230);
+  --chart-2: oklch(0.8 0.1 230);
+  --chart-3: oklch(0.75 0.18 55);
+  --chart-4: oklch(0.65 0.2 25);
+  --chart-5: oklch(0.7 0.15 300);
+  --radius: 0.5rem;
+  --sidebar: oklch(0.1 0.00 0);
+  --sidebar-foreground: oklch(0.95 0.00 0);
+  --sidebar-primary: oklch(0.7 0.1 230);
+  --sidebar-primary-foreground: oklch(0.1 0.00 0);
+  --sidebar-accent: oklch(0.15 0.00 0);
+  --sidebar-accent-foreground: oklch(0.95 0.00 0);
+  --sidebar-border: transparent;
+  --sidebar-ring: oklch(0.7 0.1 230);
+  --success: oklch(0.7 0.1 230);
+  --warning: oklch(0.75 0.18 55);
+}
+
+
+
+.dark {
+  color-scheme: dark;
+  --background: oklch(0.12 0.00 0);
+  --foreground: oklch(0.95 0.00 0);
+  --card: oklch(0.14 0.00 0);
+  --card-foreground: oklch(0.95 0.00 0);
+  --popover: oklch(0.14 0.00 0);
+  --popover-foreground: oklch(0.95 0.00 0);
+  --primary: oklch(0.7 0.1 230);
+  --primary-foreground: oklch(0.1 0.00 0);
+  --secondary: oklch(0.18 0.00 0);
+  --secondary-foreground: oklch(0.95 0.00 0);
+  --muted: oklch(0.18 0.00 0);
+  --muted-foreground: oklch(0.65 0.00 0);
+  --accent: oklch(0.7 0.1 230);
+  --accent-foreground: oklch(0.1 0.00 0);
+  --destructive: oklch(0.65 0.2 25);
+  --destructive-foreground: oklch(0.95 0 0);
+  --border: transparent;
+  --input: oklch(0.2 0.00 0);
+  --ring: oklch(0.7 0.1 230);
+  --chart-1: oklch(0.7 0.1 230);
+  --chart-2: oklch(0.8 0.1 230);
+  --chart-3: oklch(0.75 0.18 55);
+  --chart-4: oklch(0.65 0.2 25);
+  --chart-5: oklch(0.7 0.15 300);
+  --sidebar: oklch(0.1 0.00 0);
+  --sidebar-foreground: oklch(0.95 0.00 0);
+  --sidebar-primary: oklch(0.7 0.1 230);
+  --sidebar-primary-foreground: oklch(0.1 0.00 0);
+  --sidebar-accent: oklch(0.15 0.00 0);
+  --sidebar-accent-foreground: oklch(0.95 0.00 0);
+  --sidebar-border: transparent;
+  --sidebar-ring: oklch(0.7 0.1 230);
+  --success: oklch(0.7 0.1 230);
+  --warning: oklch(0.75 0.18 55);
+}
+
+@theme inline {
+  --font-sans: 'DM Sans', 'DM Sans Fallback', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'JetBrains Mono Fallback', monospace;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+
+/* Mega-Prompt Custom Effects */
+.holographic-border {
+  background: linear-gradient(135deg, #10b981, #3b82f6, #f59e0b, #10b981);
+  background-size: 300% 300%;
+  animation: holographic 3s ease infinite;
+  padding: 2px;
+  border-radius: 16px;
+}
+
+@keyframes holographic {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.perspective-1000 {
+  perspective: 1000px;
+}
+
+.backface-hidden {
+  backface-visibility: hidden;
+}
+
+
+/* OmniWatcher animations (chatbot + galaxy + tree) */
+@keyframes omni-ping {
+  0% { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+.omni-ping {
+  animation: omni-ping 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes omni-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+.omni-bob {
+  animation: omni-bob 3.4s ease-in-out infinite;
+}
+
+@keyframes omni-scan-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.omni-scan {
+  transform-origin: 60px 60px;
+  animation: omni-scan-spin 5s linear infinite;
+}
+
+@keyframes galaxy-twinkle {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+/* node glow by risk for the LLM tree */
+.tree-node {
+  cursor: pointer;
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+.tree-node:hover {
+  filter: brightness(1.25) drop-shadow(0 0 10px var(--node-glow, rgba(56, 189, 248, 0.6)));
+  transform: scale(1.06);
+}
+
+/* node shapes for LLM tree */
+.clip-hexagon {
+  clip-path: polygon(25% 5%, 75% 5%, 100% 50%, 75% 95%, 25% 95%, 0% 50%);
+}
+.clip-octagon {
+  clip-path: polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%);
+}
+.clip-pentagon {
+  clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+}
+.clip-triangle {
+  clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+}
+
+/* Ripple button (Animate UI blend) */
+@keyframes omni-ripple {
+  from {
+    transform: scale(0);
+    opacity: 0.45;
+  }
+  to {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+.ripple-ring {
+  background: radial-gradient(
+    circle,
+    var(--ripple-color, rgba(148, 233, 255, 0.35)) 0%,
+    transparent 70%
+  );
+  animation: omni-ripple 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Flip KPI card (Animate UI blend) */
+.flip-card-inner {
+  transform-style: preserve-3d;
+  transition: transform 0.7s cubic-bezier(0.4, 0.2, 0.2, 1);
+}
+.flip-card:hover .flip-card-inner,
+.flip-card:focus-within .flip-card-inner {
+  transform: rotateY(180deg);
+}
+.flip-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.flip-back {
+  transform: rotateY(180deg);
+}
+
+/* Radial intro (Animate UI blend) */
+@keyframes radial-orbit {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.radial-intro-orbit {
+  animation: radial-orbit var(--orbit-duration, 24s) linear infinite;
+}
+@keyframes radial-pop {
+  0% { opacity: 0; transform: scale(0) translateY(20px); }
+  60% { opacity: 1; transform: scale(1.15) translateY(-4px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.radial-intro-item {
+  animation: radial-pop 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}

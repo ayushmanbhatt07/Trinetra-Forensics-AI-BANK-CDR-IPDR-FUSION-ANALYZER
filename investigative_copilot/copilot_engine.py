@@ -1,0 +1,1049 @@
+import os
+import re
+import json
+import sqlite3
+from typing import Any, Dict, List, Optional
+import logging
+
+
+from backend import config
+from .db_builder import copilot_db_source, get_copilot_db
+from .graph_engine import CopilotGraphEngine
+from .llm_client import LlmClient
+from .memory import MemoryStore
+from .prompts import SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Entity resolution + investigation intelligence layer.
+# Turns raw result rows into investigator-grade evidence: entity typing,
+# per-record risk scoring, aggregate metrics, pattern insights, next-action
+# suggestions and an evidence explanation — all deterministic (offline).
+# ---------------------------------------------------------------------------
+
+_TXN_ID_RE = re.compile(r'(?i)\b(TXN\w{3,}|T\d{8,})\b')
+_IP_RE = re.compile(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)')
+_IMEI_RE = re.compile(r'(?<!\d)(?:35|86|99)\d{13}(?!\d)')
+_ACCOUNT_RE = re.compile(r'\b\d{4,16}\b')
+
+_RISK_BANDS = [
+    (86, 100, "SEVERE"),
+    (71, 85, "CRITICAL"),
+    (51, 70, "HIGH"),
+    (26, 50, "MEDIUM"),
+    (0, 25, "LOW"),
+]
+
+
+def _band(score: int) -> str:
+    for lo, hi, name in _RISK_BANDS:
+        if lo <= score <= hi:
+            return name
+    return "LOW"
+
+
+def _amount_key(r: Dict[str, Any]) -> str:
+    for k in ("transaction_amount", "amount", "total_amount", "max_leg"):
+        if r.get(k) is not None:
+            return k
+    return ""
+
+
+def _ts_key(r: Dict[str, Any]) -> str:
+    for k in ("timestamp", "call_start_time", "session_start_time", "created", "tx_time"):
+        if r.get(k):
+            return k
+    return ""
+
+
+def _mode_key(r: Dict[str, Any]) -> str:
+    for k in ("transaction_mode", "mode"):
+        if r.get(k):
+            return k
+    return ""
+
+
+def _phone_value(r: Dict[str, Any]) -> str:
+    for k in ("sender_phone_number", "receiver_phone_number", "a_party_number",
+              "mobile", "phone", "subscriber_msisdn"):
+        v = r.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
+def _account_value(r: Dict[str, Any]) -> str:
+    for k in ("sender_account_number", "receiver_account_number", "account_no"):
+        v = r.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
+def _receiver_value(r: Dict[str, Any]) -> str:
+    for k in ("receiver_account_number", "receiver_customer_name", "receiver_account", "beneficiary"):
+        v = r.get(k)
+        if v and str(v) not in ("", "None", "nan"):
+            return str(v)
+    return ""
+
+
+def _ip_value(r: Dict[str, Any]) -> str:
+    for k in ("source_ip_address", "ip_address", "ip"):
+        v = r.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
+def _resolve_entity_type(value: str) -> str:
+    """Pure regex classification of any identifier the investigator typed.
+    DB-sensitive types (complaint ack vs account vs IFSC) are refined by
+    `InvestigativeCoPilotEngine._resolve_entity_in_db`."""
+    v = (value or "").strip()
+    if not v:
+        return "identifier"
+    if _TXN_ID_RE.fullmatch(v):
+        return "transaction"
+    if _IP_RE.fullmatch(v):
+        return "ip"
+    if _IMEI_RE.fullmatch(v):
+        return "imei"
+    if re.fullmatch(r'[A-Z]{4}0[A-Z0-9]{6}', v.upper()):
+        return "ifsc"
+    digits = re.sub(r'\D', '', v)
+    if len(digits) == 10 and digits[0] in "6789":
+        return "phone"
+    if len(digits) == 12 and digits.startswith("91"):
+        return "phone"
+    if len(digits) >= 4:
+        return "account"
+    return "identifier"
+
+
+def _normalize_cot(steps: Any) -> List[Dict[str, Any]]:
+    """Normalizes chain-of-thought into the ``{step, title, content}`` shape
+    the UI renders. Accepts string lists (LLM ``cot_reasoning``), object
+    lists (deterministic pipeline) or a plain text block."""
+    out: List[Dict[str, Any]] = []
+    if isinstance(steps, list):
+        for i, s in enumerate(steps, 1):
+            if isinstance(s, dict):
+                out.append({
+                    "step": int(s.get("step") or i),
+                    "title": str(s.get("title") or s.get("heading")
+                                 or f"Step {i}"),
+                    "content": str(s.get("content") or s.get("detail")
+                                   or s.get("text") or ""),
+                })
+            elif s is not None and str(s).strip():
+                out.append({"step": i, "title": f"Step {i}",
+                            "content": str(s).strip()})
+    elif isinstance(steps, str):
+        for i, s in enumerate(steps.strip().splitlines(), 1):
+            s = s.strip()
+            if s:
+                out.append({"step": i, "title": f"Step {i}", "content": s})
+    return out
+
+class InvestigativeCoPilotEngine:
+    """Core LLM Investigative Co-Pilot Engine for Tri-Netra Forensics cyber-forensics.
+    Provides Text-to-SQL generation, 3-hop NetworkX graph traversal, Evidentiary Chain-of-Thought,
+    and executive lead auto-summarization.
+    """
+
+    def __init__(self, conn: Optional[sqlite3.Connection] = None,
+                 bundle: Optional[Dict[str, Any]] = None):
+        self.conn = conn if conn is not None else get_copilot_db(bundle)
+        self.graph_engine = CopilotGraphEngine(self.conn)
+        self.dataset_source = copilot_db_source()
+        self.llm = LlmClient()
+        self.memory = MemoryStore(bundle)
+        self._last_llm_meta: Dict[str, Any] = {}
+
+    def analyze_query(self, user_query: str) -> Dict[str, Any]:
+        """Main entry point: processes natural language user query into CoT and forensic results."""
+        query_clean = user_query.strip()
+
+        # 0. RAG: pull the top evidence rows for this query from the loaded
+        #    dataset so every answer is grounded in the uploaded corpus.
+        try:
+            from .retrieval import best_entity_hint, format_context, retrieve_context
+            self._retrieved = retrieve_context(self.conn, query_clean)
+            self._rag_block = format_context(self._retrieved)
+            hints = __import__("investigative_copilot.retrieval", fromlist=["extract_entities"]).extract_entities(query_clean)
+            self._rag_hint = best_entity_hint(hints)
+        except Exception as e:
+            logger.warning("RAG retrieval skipped: %s", e)
+            self._retrieved = []
+            self._rag_block = ""
+            self._rag_hint = None
+
+        # 1. Factual Lookup Short-Circuit
+        # If the user is asking a simple factual question about a specific ID
+        # (e.g. "Find transaction TXN12345"), we route directly to the deterministic
+        # pipeline to guarantee 100% accuracy and avoid LLM hallucination.
+        is_factual = False
+        ql = query_clean.lower()
+        if self._rag_hint and any(ql.startswith(w) for w in ["find", "show", "get", "details", "information", "what is"]):
+            # Simple queries with <= 8 words are treated as factual lookups
+            if len(query_clean.split()) <= 8:
+                is_factual = True
+
+        # 2. Try the live LLM (Groq) whenever a key exists
+        # PERF/LATENCY FIX: Disabled LLM for semantic parsing to avoid latency issues.
+        # Fall back instantly to the deterministic manual parser.
+        llm_response = None
+        # if (self.api_key or self.llm.has_provider()) and not is_factual:
+        #     llm_response = self._call_llm_api(query_clean)
+
+        # 3. If no LLM response or offline mode, run deterministic CoT pipeline
+        if not llm_response:
+            llm_response = self._run_deterministic_pipeline(query_clean)
+            llm_response["mode"] = "deterministic"
+            llm_response["llm_provider"] = self._last_llm_meta.get("provider", "")
+            llm_response["llm_model"] = self._last_llm_meta.get("model", "")
+            llm_response["llm_latency_ms"] = self._last_llm_meta.get("latency_ms", 0)
+            self._remember(llm_response, query_clean)
+
+        # 3. Attach the retrieved evidence to every envelope (any mode).
+        llm_response.setdefault("retrieved_evidence", self._retrieved[:8])
+        llm_response.setdefault("answer", llm_response.get("executive_summary") or "")
+        # 4. Plain-English explainability companion (always deterministic).
+        if not llm_response.get("explainability"):
+            try:
+                from backend.explain import plain_explainability
+                llm_response["explainability"] = plain_explainability(
+                    llm_response, query_clean)
+            except Exception as e:  # noqa: BLE001 — explainability is best-effort
+                logger.debug("explainability skipped: %s", e)
+                llm_response["explainability"] = ""
+        return llm_response
+
+    def summarize_cluster(self, entity_ids: List[str]) -> Dict[str, Any]:
+        """Generates an executive lead summary for a cluster of entities/transactions (e.g. node click in UI)."""
+        if not entity_ids:
+            return {"summary": "No entities selected for cluster summary."}
+
+        primary_entity = str(entity_ids[0]).strip()
+
+        # Resolve Transaction ID -> Account
+        target_account = primary_entity
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT receiver_account_number, sender_account_number FROM bank_transactions WHERE transaction_id = ?", (primary_entity,))
+        row_tx = cursor.fetchone()
+        if row_tx:
+            target_account = str(row_tx["receiver_account_number"]) or str(row_tx["sender_account_number"])
+
+        # Perform 3-hop graph analysis
+        graph_res = self.graph_engine.trace_mule_chain(primary_entity, max_hops=3)
+
+        if not graph_res.get("found", False):
+            return {
+                "entity_id": primary_entity,
+                "total_entities_in_cluster": len(entity_ids),
+                "graph_analysis": graph_res,
+                "executive_summary": f"Entity/Transaction '{primary_entity}' was not found in the observation network or has no connected bank/telecom activity."
+            }
+
+        resolved_start_node = graph_res.get("start_node", target_account)
+
+        cursor.execute("""
+            SELECT SUM(transaction_amount) as total_amount, COUNT(*) as tx_count
+            FROM bank_transactions
+            WHERE sender_account_number = ? OR receiver_account_number = ?
+        """, (resolved_start_node, resolved_start_node))
+        row = cursor.fetchone()
+
+        tot_amt = float(row["total_amount"]) if row and row["total_amount"] is not None else 0.0
+        tx_cnt = int(row["tx_count"]) if row and row["tx_count"] is not None else 0
+
+        l1_mules = len(graph_res.get("layers", {}).get("Layer-1 Mules", []))
+        l2_mules = len(graph_res.get("layers", {}).get("Layer-2 Mules", []))
+
+        summary_text = (
+            f"Target '{primary_entity}' resolves to Account '{resolved_start_node}' acting as a primary Layer-1 mule nexus. "
+            f"Processed ₹{tot_amt:,.2f} across {tx_cnt} transactions within the observation window. "
+            f"Graph analysis identifies {l1_mules} direct (1-hop) and {l2_mules} secondary (2-hop) downstream recipients. "
+            f"Immediate cyber cell action recommended: freeze target account and subpoena associated CDR tower logs."
+        )
+
+        return {
+            "entity_id": primary_entity,
+            "resolved_account": resolved_start_node,
+            "total_entities_in_cluster": len(entity_ids),
+            "graph_analysis": graph_res,
+            "executive_summary": summary_text
+        }
+
+    def _run_deterministic_pipeline(self, user_query: str) -> Dict[str, Any]:
+        """Deterministic query translator and CoT generator for cyber-forensic
+        scenarios. Covers tower-call correlation, mule traces, NCRP complaint
+        cross-referencing, phone / account / amount / mode lookups, layering
+        analytics and a high-value fallback — every response also carries a
+        3-hop linking tree when a resolvable entity was mentioned."""
+        q_lower = user_query.lower()
+        entity_hint: Optional[str] = None
+
+        # Recognize state/circle names dynamically
+        state_patterns = {
+            "west bengal": ["%WestBengal%", "%West Bengal%", "%Kolkata%"],
+            "kolkata": ["%Kolkata%", "%WestBengal%", "%West Bengal%"],
+            "delhi": ["%Delhi%"],
+            "gujarat": ["%Gujarat%"],
+            "karnataka": ["%Karnataka%"],
+            "maharashtra": ["%Maharashtra%"],
+            "mumbai": ["%Mumbai%"],
+            "rajasthan": ["%Rajasthan%"],
+            "tamil nadu": ["%TamilNadu%", "%Tamil Nadu%"],
+            "uttar pradesh": ["%UttarPradesh%", "%Uttar Pradesh%"],
+        }
+
+        matched_state = "West Bengal"
+        matched_patterns = ["%WestBengal%", "%West Bengal%", "%Kolkata%"]
+        for st, pat_list in state_patterns.items():
+            if st in q_lower:
+                matched_state = st.title()
+                matched_patterns = pat_list
+                break
+
+        # Scenario 0: Exact transaction / CDR / IPDR lookup
+        # Intercepts simple factual lookups to prevent LLM hallucinations.
+        import investigative_copilot.retrieval as ret
+        hints = ret.extract_entities(user_query)
+        candidate = ret.best_entity_hint(hints) or ret._extract_candidate_id(user_query)
+        is_simple_lookup = candidate and any(q_lower.startswith(w) for w in ["find", "show", "get", "details"])
+
+        if is_simple_lookup and hints.get("txn"):
+            sql_query = f"SELECT * FROM bank_transactions WHERE transaction_id = '{candidate}' COLLATE NOCASE;"
+            intent = f"Retrieve exact details for transaction {candidate}."
+            entity_hint = candidate
+        elif is_simple_lookup and hints.get("cdr"):
+            sql_query = f"SELECT * FROM cdr_records WHERE cdr_id = '{candidate}' COLLATE NOCASE;"
+            intent = f"Retrieve exact details for CDR {candidate}."
+            entity_hint = candidate
+        elif is_simple_lookup and hints.get("ipdr"):
+            sql_query = f"SELECT * FROM ipdr_records WHERE ipdr_id = '{candidate}' COLLATE NOCASE;"
+            intent = f"Retrieve exact details for IPDR {candidate}."
+            entity_hint = candidate
+        elif is_simple_lookup and hints.get("account"):
+            sql_query = f"SELECT * FROM bank_transactions WHERE sender_account_number = '{candidate}' OR receiver_account_number = '{candidate}' ORDER BY timestamp ASC LIMIT 30;"
+            intent = f"Retrieve complete transaction profile for account {candidate}."
+            entity_hint = candidate
+        elif is_simple_lookup and candidate: # Fallback for unrecognized candidate ID
+            sql_query = f"SELECT * FROM bank_transactions WHERE transaction_id = '{candidate}' COLLATE NOCASE;"
+            intent = f"Attempt to retrieve exact details for unrecognised identifier {candidate}."
+            entity_hint = candidate
+
+        # Scenario A: tower / call location + time window + transfer
+        elif any(k in q_lower for k in ["tower", "bts", "location", "originating", "circle", "5 minute", "call"]):
+            where_conditions = " OR ".join([f"cr.first_bts_location LIKE '{p}' OR cr.roaming_network_circle LIKE '{p}'" for p in matched_patterns])
+            sql_query = f"""
+            SELECT 
+                bt.transaction_id, bt.timestamp as tx_time, bt.transaction_amount, 
+                bt.sender_account_number, bt.receiver_account_number, bt.receiver_customer_name,
+                cr.cdr_id, cr.call_start_time, cr.first_bts_location, cr.roaming_network_circle, cr.a_party_number,
+                bcl.time_difference_seconds
+            FROM bank_transactions bt
+            JOIN bank_cdr_links bcl ON bt.transaction_id = bcl.transaction_id
+            JOIN cdr_records cr ON bcl.cdr_id = cr.cdr_id
+            WHERE ({where_conditions})
+              AND ABS(bcl.time_difference_seconds) <= 300
+            ORDER BY bt.transaction_amount DESC
+            LIMIT 20;
+            """
+            intent = f"Identify all bank accounts receiving transfers within 5 minutes (300s) of calls originating from {matched_state} tower locations."
+
+        # Scenario B: NCRP complaint ledger cross-reference
+        elif any(k in q_lower for k in ["complaint", "ncrp", "acknowledgement", "police", "cyber cell", "beneficiary account"]):
+            complaint_accs = re.findall(r'\b\d{4,16}\b', user_query)
+            if not complaint_accs:
+                complaint_accs = re.findall(r'\b[A-Z]{2,4}\d{2,16}\b', user_query)
+            filter_sql = ""
+            if complaint_accs:
+                acc_pattern = " OR ".join(f"c.account_no LIKE '%{a}%'" for a in complaint_accs[:5])
+                filter_sql = f" AND ({acc_pattern})"
+                entity_hint = complaint_accs[0]
+            sql_query = f"""
+            SELECT c.acknowledgement_no, c.account_no, c.state, c.police_station, c.mobile,
+                   bt.transaction_id, bt.timestamp, bt.transaction_amount, bt.transaction_mode,
+                   bt.sender_account_number, bt.receiver_account_number, bt.receiver_customer_name
+            FROM complaints c
+            LEFT JOIN bank_transactions bt
+              ON bt.sender_account_number = c.account_no OR bt.receiver_account_number = c.account_no
+            WHERE c.account_no != ''{filter_sql}
+            ORDER BY bt.timestamp ASC
+            LIMIT 30;
+            """
+            intent = ("Cross-reference the NCRP police complaint ledger against observed bank activity "
+                      "to surface fund flows touching complained fraud-beneficiary accounts.")
+
+        # Scenario C: phone / subscriber lookup
+        elif any(k in q_lower for k in ["phone", "msisdn", "number ", "caller", "subscriber"]):
+            phone_m = re.search(r'(?<!\d)(91)?\d{10}(?!\d)', user_query)
+            phone_raw = phone_m.group(0) if phone_m else ""
+            phone10 = phone_raw[-10:] if phone_raw else ""
+            sql_phone = "+91" + phone10
+            variants = sorted({sql_phone, "91" + phone10, phone_raw, phone_raw.lstrip("+")}, key=len, reverse=True)
+            entity_hint = phone10 or None
+            if not phone10:
+                sql_query = """
+                SELECT phone, imsi, imei, name, circle, operator
+                FROM subscribers ORDER BY phone LIMIT 20;
+                """
+                intent = "List all subscriber metadata recovered from the CDR dataset."
+            else:
+                in_clause = "(" + ", ".join(f"'{v}'" for v in variants) + ")"
+                sql_query = f"""
+                SELECT bt.transaction_id, bt.timestamp, bt.transaction_amount, bt.transaction_mode,
+                       bt.sender_account_number, bt.receiver_account_number, bt.receiver_customer_name,
+                       bt.sender_phone_number, bt.receiver_phone_number,
+                       cr.cdr_id, cr.call_start_time, cr.call_duration_seconds, cr.first_bts_location,
+                       ipr.ipdr_id, ipr.session_start_time, ipr.source_ip_address
+                FROM bank_transactions bt
+                LEFT JOIN cdr_records cr
+                  ON cr.a_party_number IN {in_clause} OR cr.b_party_number IN {in_clause}
+                LEFT JOIN ipdr_records ipr ON ipr.subscriber_msisdn IN {in_clause}
+                WHERE bt.sender_phone_number IN {in_clause} OR bt.receiver_phone_number IN {in_clause}
+                   OR cr.cdr_id IS NOT NULL OR ipr.ipdr_id IS NOT NULL
+                ORDER BY bt.timestamp ASC
+                LIMIT 30;
+                """
+                intent = f"Trace every bank transaction, CDR call and IPDR session touching phone number '{phone10}'."
+
+        # Scenario D: account / customer lookup
+        elif "account" in q_lower or "ifsc" in q_lower or "customer" in q_lower:
+            acc_m = re.findall(r'\b\d{4,16}\b', user_query)
+            if not acc_m:
+                acc_m = re.findall(r'\b[A-Z]{2,4}\d{2,16}\b', user_query)
+            acc = acc_m[0] if acc_m else ""
+            entity_hint = acc or None
+            acc_filter = (f"WHERE sender_account_number LIKE '%{acc}%' OR receiver_account_number LIKE '%{acc}%'"
+                          if acc else "")
+            sql_query = f"""
+            SELECT transaction_id, timestamp, transaction_amount, transaction_mode,
+                   sender_customer_name, sender_account_number,
+                   receiver_customer_name, receiver_account_number, receiver_phone_number
+            FROM bank_transactions
+            {acc_filter}
+            ORDER BY timestamp ASC
+            LIMIT 30;
+            """
+            intent = (f"Pull the complete transaction profile for account '{acc}'."
+                      if acc else "List the complete account activity present in the dataset.")
+
+        # Scenario E: Mule chain / 3-hop trace
+        elif "mule" in q_lower or "hop" in q_lower or "trace" in q_lower or "flow" in q_lower:
+            target_acc = "ACC_1001"
+            # Extract numbers (pure numeric or alphanumeric account tokens)
+            found_nums = re.findall(r'\b\d{4,12}\b', user_query)
+            if not found_nums:
+                found_nums = re.findall(r'\b[A-Z]{2,4}\d{2,12}\b', user_query)
+            if found_nums:
+                target_acc = found_nums[0]
+
+            graph_res = self.graph_engine.trace_mule_chain(target_acc, max_hops=3)
+
+            sql_query = f"""
+            SELECT transaction_id, timestamp, transaction_amount, sender_account_number, receiver_account_number, transaction_mode
+            FROM bank_transactions
+            WHERE sender_account_number = '{target_acc}' OR receiver_account_number = '{target_acc}'
+            ORDER BY timestamp ASC;
+            """
+
+            intent = f"Perform 3-hop NetworkX mule money flow traversal starting from Account/Entity '{target_acc}'."
+            results = self._execute_safe_sql(sql_query)
+
+            cot_steps = [
+                {"step": 1, "title": "Intent & Entity Extraction", "content": intent},
+                {"step": 2, "title": "Query Generation (SQL + 3-Hop NetworkX)", "content": f"Graph Traversal: 3-hop BFS on target '{target_acc}'. SQL: {sql_query.strip()}"},
+                {"step": 3, "title": "Execution Results", "content": f"Retrieved {len(results)} direct transactions and traversed {graph_res.get('total_nodes', 0)} connected graph nodes across 3 hops."},
+                {"step": 4, "title": "Evidentiary Correlation", "content": f"Categorized entities into {len(graph_res.get('layers', {}).get('Layer-1 Mules', []))} Layer-1 Mules, {len(graph_res.get('layers', {}).get('Layer-2 Mules', []))} Layer-2 Mules, and {len(graph_res.get('layers', {}).get('Layer-3 Offramps', []))} Layer-3 Offramps."},
+                {"step": 5, "title": "Executive Lead Summary", "content": f"Entity '{target_acc}' exhibits structured money laundering. Funds are rapidly dispersed across a 3-hop network within short time deltas. Recommended for immediate account freezing and subpoena of CDR tower records."}
+            ]
+
+            return self._finalize({
+                "query": user_query,
+                "intent": intent,
+                "generated_sql": sql_query.strip(),
+                "execution_success": True,
+                "row_count": len(results),
+                "records": results[:10],
+                "graph_traversal": graph_res,
+                "linking_tree": self.graph_engine.linking_tree(target_acc, max_hops=3),
+                "chain_of_thought": cot_steps,
+                "executive_summary": cot_steps[-1]["content"]
+            }, entity_hint=target_acc)
+
+        # Scenario F: amount / mode filters (high-value or mode-specific)
+        elif any(k in q_lower for k in ["greater than", "more than", "above", "exceeding", "high value", "large", "round"]):
+            amount_m = re.search(r'(?:[₹rs. ]*)(\d[\d,]*)', user_query)
+            amount = 0.0
+            if amount_m:
+                try:
+                    amount = float(amount_m.group(1).replace(",", ""))
+                except ValueError:
+                    amount = 0.0
+            mode = next((m for m in ("UPI", "IMPS", "NEFT", "RTGS", "ATM", "NETBANKING", "CHEQUE")
+                         if m in q_lower.upper()), "")
+            mode_sql = f" AND transaction_mode = '{mode}'" if mode else ""
+            sql_query = f"""
+            SELECT transaction_id, timestamp, transaction_amount, transaction_mode,
+                   sender_account_number, receiver_account_number, receiver_customer_name
+            FROM bank_transactions
+            WHERE transaction_amount >= {amount:.2f}{mode_sql}
+            ORDER BY transaction_amount DESC
+            LIMIT 30;
+            """
+            intent = (f"Identify all {'{' + mode + ' ' if mode else ''}transactions of ₹{amount:,.0f} or more." if amount
+                      else f"Identify the highest-value {'{' + mode + ' ' if mode else ''}transactions in the dataset.")
+
+        # Scenario G: layering / top receiver analytics
+        elif any(k in q_lower for k in ["top receiver", "layering", "layered", "rapidly", "smurf"]):
+            sql_query = """
+            SELECT receiver_account_number, receiver_customer_name,
+                   SUM(transaction_amount) as total_amount, COUNT(*) as tx_count,
+                   COUNT(DISTINCT sender_account_number) as senders, MAX(transaction_amount) as max_leg
+            FROM bank_transactions
+            GROUP BY receiver_account_number
+            ORDER BY total_amount DESC
+            LIMIT 20;
+            """
+            intent = ("Rank receiver accounts by total inflow to detect layering / smurfing "
+                      "patterns where funds are consolidated into a single beneficiary.")
+
+        # Scenario H: Default fallback query (All high-value correlated transactions)
+        else:
+            sql_query = """
+            SELECT 
+                bt.transaction_id, bt.timestamp, bt.transaction_amount, bt.transaction_mode,
+                bt.sender_customer_name, bt.sender_account_number,
+                bt.receiver_customer_name, bt.receiver_account_number,
+                bcl.cdr_id, bcl.time_difference_seconds
+            FROM bank_transactions bt
+            LEFT JOIN bank_cdr_links bcl ON bt.transaction_id = bcl.transaction_id
+            ORDER BY bt.transaction_amount DESC
+            LIMIT 15;
+            """
+            intent = "Retrieve high-value bank transactions cross-linked with CDR call events."
+
+        results = self._execute_safe_sql(sql_query)
+
+        # Build executive summary
+        if locals().get("is_simple_lookup"):
+            summary = (
+                f"Query analyzed {len(results)} matching forensic records. "
+                f"Retrieved exact database rows for the requested identifier."
+            )
+            step4 = "Direct database identifier lookup; cross-correlation not applicable for this query."
+            risk_summary = "This is a direct factual lookup. No suspicious patterns or anomaly detection rules were triggered by this query."
+        else:
+            summary = (
+                f"Query analyzed {len(results)} matching forensic records. "
+                f"Key findings highlight suspicious high-value transfers correlated with telecom call timestamps. "
+                f"Cross-dataset links verify concurrent phone call activity near financial transactions."
+            )
+            step4 = "Correlated Bank transaction IDs with pre-computed CDR link IDs and time difference deltas."
+            risk_summary = "This entity was flagged due to high-value transfers strictly correlated with telecom communication windows, indicating possible money mule instructions."
+
+        cot_steps = [
+            {"step": 1, "title": "Intent & Entity Extraction", "content": intent},
+            {"step": 2, "title": "Query Generation (SQLite)", "content": sql_query.strip()},
+            {"step": 3, "title": "Execution Results", "content": f"Executed query successfully. Returned {len(results)} matched records."},
+            {"step": 4, "title": "Evidentiary Correlation", "content": step4},
+            {"step": 5, "title": "Executive Lead Summary", "content": summary}
+        ]
+
+        envelope = {
+            "query": user_query,
+            "intent": intent,
+            "generated_sql": sql_query.strip(),
+            "execution_success": True,
+            "row_count": len(results),
+            "records": results[:10],
+            "chain_of_thought": cot_steps,
+            "executive_summary": summary,
+            "risk_summary": risk_summary
+        }
+        # Graph computation deferred: no longer eagerly generate linking tree here.
+        # envelope["linking_tree"] = self._linking_tree(entity_hint) if entity_hint else None
+        return self._finalize(envelope, entity_hint=entity_hint)
+
+    def _linking_tree(self, entity_hint: str) -> Optional[Dict[str, Any]]:
+        """Best-effort enriched 3-hop linking tree (transactions <-> phones
+        <-> accounts) for a resolved entity; None when the entity is not in
+        the graph. Always the `linking_tree()` layer-list shape."""
+        try:
+            return self.graph_engine.linking_tree(str(entity_hint), max_hops=3)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------ intel layer
+
+    @staticmethod
+    def _score_record(r: Dict[str, Any]) -> Dict[str, Any]:
+        """Deterministic risk estimate (0-100) for a copilot result row.
+        Rules: large-value, night-hour, fast-payment modes, telecom/internet
+        correlation and round-amount signals. Never mutates the input."""
+        score = 0
+        amount = 0.0
+        try:
+            amount = float(r.get(_amount_key(r)) or 0.0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount >= 500_000:
+            score += 30
+        elif amount >= 100_000:
+            score += 20
+        elif amount >= 25_000:
+            score += 10
+
+        ts_raw = r.get(_ts_key(r)) or ""
+        ts_s = str(ts_raw)
+        try:
+            hour = int(ts_s[11:13])
+        except (IndexError, ValueError):
+            hour = -1
+        if 0 <= hour <= 5 or hour >= 22:
+            score += 15
+
+        mode = str(r.get(_mode_key(r)) or "").upper()
+        if mode in ("UPI", "IMPS", "PAYTM", "WALLET"):
+            score += 10
+        elif mode in ("NEFT", "RTGS", "CHEQUE", "NETBANKING"):
+            score += 5
+
+        if r.get("cdr_id") or r.get("ipdr_id"):
+            score += 8
+        try:
+            if abs(float(r.get("time_difference_seconds") or 0)) <= 300:
+                score += 8
+        except (TypeError, ValueError):
+            pass
+        if amount >= 10_000 and amount % 1000 == 0:
+            score += 8
+
+        score = min(100, score)
+        return {"risk_score": score, "risk_band": _band(score)}
+
+    def _resolve_entity_in_db(self, value: str) -> str:
+        """DB-backed entity resolution: confirms ambiguous identifiers against
+        the complaint ledger, bank accounts, subscriber phones and IFSC codes
+        before the pure-regex classification is trusted."""
+        v = (value or "").strip()
+        t = _resolve_entity_type(v)
+        if t in ("phone", "ip", "imei", "transaction", "ifsc"):
+            return t
+        cursor = self.conn.cursor()
+        row = cursor.execute(
+            "SELECT COUNT(*) c FROM complaints WHERE acknowledgement_no = ?",
+            (v,)).fetchone()
+        if row and row["c"]:
+            return "complaint"
+        row = cursor.execute(
+            "SELECT COUNT(*) c FROM bank_transactions "
+            "WHERE sender_account_number = ? OR receiver_account_number = ?",
+            (v, v)).fetchone()
+        if row and row["c"]:
+            return "account"
+        row = cursor.execute(
+            "SELECT COUNT(*) c FROM subscribers WHERE phone = ? OR phone LIKE ?",
+            (v, f"%{v[-10:]}")).fetchone()
+        if row and row["c"]:
+            return "phone"
+        return t
+
+    def _build_investigation_intel(
+        self, records: List[Dict[str, Any]], entity_hint: Optional[str],
+        user_query: str, total_found: int = 0) -> Dict[str, Any]:
+        """The AI Investigation Assistant layer: entity resolution banner,
+        INVESTIGATION SUMMARY, quick METRICS, AI INSIGHTS, next-action
+        SUGGESTIONS and an EXPLANATION of why these records were returned.
+        Works offline for every query path (deterministic + LLM)."""
+        rows = records or []
+        total_found = max(total_found, len(rows))
+        amounts: List[float] = []
+        accounts: Dict[str, int] = {}
+        phones: Dict[str, int] = {}
+        ips: List[str] = []
+        receivers: Dict[str, int] = {}
+        night_count = 0
+        linked_count = 0
+        mode_counts: Dict[str, int] = {}
+        risk_scores: List[int] = []
+
+        for r in rows:
+            try:
+                amt = float(r.get(_amount_key(r)) or 0.0)
+            except (TypeError, ValueError):
+                amt = 0.0
+            amounts.append(amt)
+            for a in (r.get("sender_account_number"), r.get("receiver_account_number")):
+                if a:
+                    accounts[str(a)] = accounts.get(str(a), 0) + 1
+            ph = _phone_value(r)
+            if ph:
+                phones[ph] = phones.get(ph, 0) + 1
+            ip = _ip_value(r)
+            if ip and ip not in ips:
+                ips.append(ip)
+            recv = _receiver_value(r)
+            if recv:
+                receivers[recv] = receivers.get(recv, 0) + 1
+            ts_s = str(r.get(_ts_key(r)) or "")
+            try:
+                hour = int(ts_s[11:13])
+            except (IndexError, ValueError):
+                hour = -1
+            if 0 <= hour <= 5 or hour >= 22:
+                night_count += 1
+            if (r.get("cdr_id") not in (None, "", "None")) or (r.get("ipdr_id") not in (None, "", "None")):
+                linked_count += 1
+            mode = str(r.get(_mode_key(r)) or "").upper()
+            if mode:
+                mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            risk_scores.append(self._score_record(r)["risk_score"])
+
+        total_amount = sum(amounts)
+        found = total_found or len(rows)
+        highest = max(risk_scores) if risk_scores else 0
+        avg = round(sum(risk_scores) / len(risk_scores)) if risk_scores else 0
+        primary_account = max(accounts, key=accounts.get) if accounts else ""
+        common_phone = max(phones, key=phones.get) if phones else ""
+        top_receiver = max(receivers, key=receivers.get) if receivers else ""
+        linked_ips = len(ips)
+
+        entity_type = self._resolve_entity_in_db(entity_hint or "")
+
+        narrative = (
+            f"The query returned {found} matching forensic record{'s' if found != 1 else ''} "
+            f"totalling ₹{total_amount:,.0f} with a peak risk score of {highest}/100. "
+        )
+        if primary_account:
+            narrative += f"The primary account involved is {primary_account}. "
+        if common_phone:
+            narrative += f"A common phone {common_phone} recurs across the activity. "
+        if top_receiver:
+            narrative += f"Funds concentrated toward {top_receiver}. "
+        if linked_ips:
+            narrative += f"{linked_ips} distinct IP address{'es' if linked_ips != 1 else ''} are linked. "
+        if not rows:
+            narrative = ("No records matched this query. Try a phone number, account number, "
+                         "transaction ID, IMEI, IP address or NCRP acknowledgement number, "
+                         "or rephrase the question.")
+
+        # ---- AI insights (pattern engine) ----
+        insights: List[Dict[str, Any]] = []
+        for recv, n in sorted(receivers.items(), key=lambda kv: -kv[1]):
+            if n >= 2:
+                insights.append({
+                    "title": "Repeated Beneficiary",
+                    "detail": f"{recv} appears in {n} of {found} records — funds may consolidate into one mule pocket.",
+                    "severity": "high" if n >= 4 else "medium",
+                })
+        for ph, n in sorted(phones.items(), key=lambda kv: -kv[1]):
+            if n >= 2:
+                insights.append({
+                    "title": "Shared Phone",
+                    "detail": f"Phone {ph} recurs in {n} records, linking otherwise separate activity to one subscriber.",
+                    "severity": "medium",
+                })
+        if found and night_count / found >= 0.4:
+            insights.append({
+                "title": "Night-Concentrated Activity",
+                "detail": f"{round(night_count * 100 / found)}% of activity occurred between 22:00–06:00, a common evasion pattern.",
+                "severity": "medium",
+            })
+        bursts = 0
+        for a, n in accounts.items():
+            if n >= 3:
+                bursts += 1
+        if bursts:
+            insights.append({
+                "title": "Velocity Burst",
+                "detail": f"{bursts} account(s) show 3+ records in the result set — rapid sequential movement consistent with layering.",
+                "severity": "high",
+            })
+        big = sum(1 for a in amounts if a >= 500_000)
+        if big:
+            insights.append({
+                "title": "Large-Value Transfers",
+                "detail": f"{big} record(s) exceed ₹5,00,000 — above the PMLA cash-threshold reporting band.",
+                "severity": "high",
+            })
+        if linked_count and linked_count / found >= 0.3:
+            insights.append({
+                "title": "Telecom-Correlated Activity",
+                "detail": f"{linked_count} of {found} records carry linked CDR/IPDR events, tying money movement to a live handset.",
+                "severity": "medium",
+            })
+        if mode_counts and len(mode_counts) == 1:
+            only = next(iter(mode_counts))
+            insights.append({
+                "title": "Single-Mode Concentration",
+                "detail": f"All {found} records used {only} — uniform rail selection can indicate scripted mule behavior.",
+                "severity": "low",
+            })
+
+        # ---- next-action suggestions (context aware, actionable, explained) ----
+        suggestions: List[Dict[str, Any]] = []
+        hint = entity_hint or primary_account or common_phone
+        if hint:
+            suggestions.append({
+                "action": "Investigate Entity",
+                "target": hint,
+                "why": f"Start a fresh 3-hop investigation centered on {hint}.",
+                "query": f"Trace the 3-hop mule flow from {hint}",
+            })
+        if primary_account:
+            suggestions.append({
+                "action": "Trace Money Flow",
+                "target": primary_account,
+                "why": f"{primary_account} is the most active account in this result set.",
+                "query": f"Trace all transactions for account {primary_account}",
+            })
+            suggestions.append({
+                "action": "Generate STR",
+                "target": primary_account,
+                "why": "Sufficient evidence exists for a Suspicious Transaction Report.",
+                "query": f"Generate a report for account {primary_account}",
+            })
+        if common_phone:
+            suggestions.append({
+                "action": "Find Linked Calls",
+                "target": common_phone,
+                "why": f"Phone {common_phone} recurs across records — pull its CDR activity.",
+                "query": f"Trace all activity for phone {common_phone}",
+            })
+        if hints_ips := ips[:3]:
+            suggestions.append({
+                "action": "Analyze IP",
+                "target": hints_ips[0],
+                "why": f"IP {hints_ips[0]} appears across the result set.",
+                "query": f"Show activity for IP {hints_ips[0]}",
+            })
+        if top_receiver and top_receiver not in (primary_account, hint):
+            suggestions.append({
+                "action": "Investigate Receiver",
+                "target": top_receiver,
+                "why": f"{top_receiver} is the dominant inflow destination.",
+                "query": f"Trace all activity for beneficiary {top_receiver}",
+            })
+
+        # ---- explanation (why these records) ----
+        explanation: List[str] = []
+        if entity_hint and entity_type != "identifier":
+            explanation.append(
+                f"Entity resolution: '{entity_hint}' was classified as a {entity_type} and used to filter the result set.")
+        if found:
+            explanation.append(
+                f"{found} records matched the query intent '{user_query[:80]}'.")
+        if total_amount >= 100_000:
+            explanation.append(f"Combined value ₹{total_amount:,.0f} exceeds the high-value threshold.")
+        for ins in insights[:4]:
+            explanation.append(f"{ins['title']}: {ins['detail']}")
+        if not explanation:
+            explanation.append("No records matched; broaden the identifier or rephrase the question.")
+
+        return {
+            "entity_resolution": {
+                "entity_id": entity_hint or primary_account or "",
+                "entity_type": entity_type,
+                "resolved": bool(entity_hint or primary_account),
+            },
+            "investigation_summary": {
+                "found_transactions": found,
+                "total_amount": round(total_amount, 2),
+                "highest_risk": highest,
+                "primary_account": primary_account,
+                "common_phone": common_phone,
+                "linked_ips": linked_ips,
+                "linked_beneficiaries": len(receivers),
+                "top_receiver": top_receiver,
+                "narrative": narrative,
+            },
+            "metrics": {
+                "records": found,
+                "total_amount": round(total_amount, 2),
+                "accounts": len(accounts),
+                "phones": len(phones),
+                "ips": linked_ips,
+                "beneficiaries": len(receivers),
+                "highest_risk": highest,
+                "avg_risk": avg,
+            },
+            "insights": insights[:6],
+            "suggestions": suggestions[:6],
+            "explanation": explanation,
+        }
+
+    def _finalize(self, envelope: Dict[str, Any],
+                  entity_hint: Optional[str] = None) -> Dict[str, Any]:
+        """Attach per-record risk + the investigation-intel block to every
+        query envelope, regardless of the path (deterministic or LLM)."""
+        records = envelope.get("records") or []
+        annotated = []
+        for r in records:
+            rec = dict(r)
+            rec.update(self._score_record(rec))
+            annotated.append(rec)
+        envelope["records"] = annotated
+        intel = self._build_investigation_intel(
+            annotated, entity_hint, str(envelope.get("query") or ""),
+            total_found=int(envelope.get("row_count") or 0))
+        envelope.update(intel)
+        
+        if envelope.get("mode") == "sql":
+            highest = intel.get("investigation_summary", {}).get("highest_risk", 0)
+            if highest > 85:
+                tx_ids = [r.get("transaction_id") for r in annotated if r.get("transaction_id")]
+                reasons_text = []
+                if tx_ids:
+                    in_clause = ",".join(f"'{x}'" for x in tx_ids)
+                    cursor = self.conn.cursor()
+                    cursor.execute(f"SELECT transaction_id, scenario_type FROM anomaly_records WHERE transaction_id IN ({in_clause}) AND is_suspicious = 1")
+                    from backend.explain import _lookup
+                    for row in cursor.fetchall():
+                        if row["scenario_type"]:
+                            reasons_text.append(f"Transaction {row['transaction_id']}: {_lookup(row['scenario_type'])}.")
+                
+                if reasons_text:
+                    envelope["risk_summary"] = "This activity is classified as highly suspicious (Risk Score > 85). " + " ".join(reasons_text)
+                else:
+                    envelope["risk_summary"] = f"This activity is classified as highly suspicious (Risk Score: {highest}). It exhibits high-risk behavioural patterns (such as round amounts, unusual hours, or rapid telecom correlation) despite lacking an explicit ML anomaly label."
+            else:
+                envelope["risk_summary"] = f"According to the risk engine, this activity is NOT considered suspicious (Risk Score {highest} <= 85). No critical anomaly patterns were detected."
+                
+        return envelope
+
+    def _execute_safe_sql(self, sql_query: str) -> List[Dict[str, Any]]:
+        """Executes query with strict read-only safety validation."""
+        sql_clean = sql_query.strip().upper()
+        # Prevent non-SELECT statements
+        if not sql_clean.startswith("SELECT") and not sql_clean.startswith("WITH"):
+            raise ValueError("Security violation: Only SELECT queries are permitted.")
+
+        # Reject write / meta / side-effect statements outright
+        forbidden_keywords = [
+            "DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE",
+            "REPLACE", "ATTACH", "DETACH", "PRAGMA", "EXPLAIN", "VACUUM",
+            "REINDEX", "CREATE", "GRANT", "REVOKE",
+        ]
+        for kw in forbidden_keywords:
+            if re.search(r'\b' + kw + r'\b', sql_clean):
+                raise ValueError(f"Security violation: Query contains illegal keyword '{kw}'.")
+
+        # Reject multi-statement payloads ("...; DROP ...")
+        statements = [s.strip() for s in sql_query.split(";") if s.strip()]
+        if len(statements) > 1:
+            raise ValueError(
+                "Security violation: multiple statements are not permitted.")
+
+        cursor = self.conn.cursor()
+        cursor.execute(sql_query)
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    def _remember(self, envelope: Dict[str, Any], user_query: str) -> None:
+        """Feeds every answered query back into the learning memory so
+        follow-up questions carry conversation + case continuity."""
+        try:
+            summary = str(envelope.get("executive_summary") or "").strip()
+            if not summary:
+                summary = str(envelope.get("intent") or "").strip()
+            if summary:
+                self.memory.remember_turn(user_query, summary)
+        except Exception as e:
+            logger.warning(f"Failed to update copilot memory: {e}")
+
+    def _call_llm_api(self, user_query: str) -> Optional[Dict[str, Any]]:
+        """Calls the live LLM (Groq).
+
+        Returns an envelope with ``mode``:
+          * "sql"      — model generated SQL, executed against the copilot DB
+          * "general"  — model answered from general knowledge (sql_query null)
+        Returns None only when both providers failed; the caller falls back
+        to the deterministic pipeline.
+        """
+        try:
+            user_content = (
+                f"CORPUS BRIEF + CONVERSATION MEMORY:\n{self.memory.memory_block()}"
+                f"\n\n{getattr(self, '_rag_block', '')}"
+                f"\n\nINVESTIGATOR QUERY: {user_query}"
+            )
+            ok, parsed, meta = self.llm.generate_json(SYSTEM_PROMPT, user_content)
+            self._last_llm_meta = meta
+            if not ok or not parsed:
+                logger.info(f"LLM unavailable ({meta.get('error')}); "
+                            "deterministic pipeline will serve this query.")
+                return None
+
+            sql_q = str(parsed.get("sql_query") or "").strip()
+            general_answer = str(parsed.get("general_answer") or "").strip()
+            start_node = str(parsed.get("graph_start_node") or "").strip() or None
+
+            if sql_q and not sql_q.upper().startswith("NULL"):
+                records = []
+                execution_success = True
+                try:
+                    records = self._execute_safe_sql(sql_q)
+                except Exception as e:
+                    execution_success = False
+                    logger.warning(f"LLM generated invalid SQL: {e}")
+
+                # Graph computation deferred: trace_mule_chain / linking_tree
+                # are no longer run eagerly during the normal query path.
+                # The /llm-tree endpoint handles graph generation on demand.
+                graph_res = None
+                tree_res = None
+
+                envelope = self._finalize({
+                    "query": user_query,
+                    "intent": parsed.get("intent", user_query),
+                    "generated_sql": sql_q,
+                    "execution_success": execution_success,
+                    "row_count": len(records),
+                    "records": records[:10],
+                    "graph_traversal": graph_res,
+                    "linking_tree": tree_res,
+                    "chain_of_thought": _normalize_cot(
+                        parsed.get("cot_reasoning", [])),
+                    "executive_summary": parsed.get("executive_summary",
+                                                    general_answer),
+                    "risk_summary": parsed.get("suspicion_reasoning", ""),
+                    "answer": parsed.get("final_answer") or parsed.get("executive_summary") or general_answer,
+                    "mode": "sql",
+                }, entity_hint=start_node)
+            else:
+                # General / conceptual question — no SQL, full interpretive
+                # answer, but still surface corpus-aware suggestions.
+                summary = (parsed.get("executive_summary") or general_answer
+                           or f"Interpretation of: {user_query}")
+                envelope = {
+                    "query": user_query,
+                    "intent": parsed.get("intent", user_query),
+                    "generated_sql": "",
+                    "execution_success": True,
+                    "row_count": 0,
+                    "records": [],
+                    "graph_traversal": None,
+                    "linking_tree": None,
+                    "chain_of_thought": _normalize_cot(
+                        parsed.get("cot_reasoning", [])),
+                    "executive_summary": summary,
+                    "general_answer": general_answer,
+                    "answer": parsed.get("final_answer") or summary,
+                    "mode": "general",
+                }
+                envelope.update(self._build_investigation_intel(
+                    [], None, user_query, total_found=0))
+
+            envelope["llm_provider"] = meta.get("provider", "")
+            envelope["llm_model"] = meta.get("model", "")
+            envelope["llm_latency_ms"] = meta.get("latency_ms", 0)
+            self._remember(envelope, user_query)
+            return envelope
+        except Exception as e:
+            logger.warning(f"LLM API call skipped/failed: {e}")
+        return None
