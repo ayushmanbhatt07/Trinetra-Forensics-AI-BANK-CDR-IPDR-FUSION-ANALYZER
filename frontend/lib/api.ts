@@ -178,9 +178,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     return (await res.json()) as T;
   } catch (err) {
     if (err instanceof ApiError) throw err;
-    throw new ApiError(0, err instanceof Error ? err.message : "Backend unreachable / warming up");
+    const msg = err instanceof Error ? err.message : "";
+    if (!msg || msg.toLowerCase().includes("failed to fetch") || msg.toLowerCase().includes("networkerror")) {
+      throw new ApiError(0, "Backend unreachable. If the server was sleeping (Render cold-start), please wait 15 seconds and retry.");
+    }
+    throw new ApiError(0, msg);
   }
 }
+
 
 
 export interface IngestStatus {

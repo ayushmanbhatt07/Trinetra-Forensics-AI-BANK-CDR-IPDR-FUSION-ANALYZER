@@ -87,10 +87,12 @@ allow_origins_cfg = cors_list if "*" not in cors_list else ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins_cfg,
-    allow_credentials=False if "*" in allow_origins_cfg else True,
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 app.include_router(copilot_router.router)
 # Force reload for copilot and cache locks
