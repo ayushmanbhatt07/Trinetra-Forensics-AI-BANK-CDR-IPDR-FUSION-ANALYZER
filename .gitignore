@@ -1,0 +1,163 @@
+# ============================================================
+# .gitignore
+# Covers: Python backend, React/Vite frontend, ML artefacts,
+#         editor files, OS noise, and secrets.
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.pixi/
+
+# Package / build artefacts
+*.egg-info/
+*.egg
+dist/
+build/
+develop-eggs/
+eggs/
+.eggs/
+wheels/
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Type checkers & linters
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Test / coverage
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+*.cover
+*.py.cover
+.hypothesis/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# Misc Python tooling
+.pdm-python
+.pdm-build/
+__pypackages__/
+.abstra/
+cython_debug/
+tempCodeRunnerFile.py
+.pypirc
+
+
+# ------------------------------------------------------------
+# NODE / FRONTEND
+# ------------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
+.npm
+.yarn/cache
+.yarn/unplugged
+.pnp.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+
+# ------------------------------------------------------------
+# ML ARTEFACTS — large generated files, keep only in backend/
+# The joblib model IS committed (it's small and needed to run).
+# Generated CSVs and OCR debug images are excluded.
+# ------------------------------------------------------------
+
+# OCR preprocessing debug images
+ocr_prep_debug/
+*.png.debug
+
+# Temporary parsed output at the repo root (stray artefacts)
+bank_parsed.csv
+*_parsed.csv
+
+# Uploaded case evidence — real statements parsed through the API. Never commit
+# these; they are per-investigation data, not part of the project.
+backend/notebook/output/uploads/
+
+# HuggingFace model cache (auto-downloaded, no need to commit)
+.cache/huggingface/
+
+# Large sentence-transformer model weights if accidentally placed locally
+backend/pdf-parser/models/
+sentence_transformers_cache/
+
+
+# ------------------------------------------------------------
+# EDITOR & OS
+# ------------------------------------------------------------
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (PyCharm, WebStorm, etc.)
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+
+# ------------------------------------------------------------
+# LOGS & RUNTIME
+# ------------------------------------------------------------
+*.log
+*.pid
+*.seed
+*.sqlite3
+*.sqlite3-journal
+
+# Uvicorn / FastAPI temp uploads
+/tmp/backend-uploads/
+backend/uploads/
+
+
+# ------------------------------------------------------------
+# MISC
+# ------------------------------------------------------------
+.DS_Store
+.cache
+.ruff_cache/
+.hypothesis/
+site/
+docs/_build/
+
+# CatBoost training artifacts
+catboost_info/

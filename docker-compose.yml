@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_DATA_DIR: /app/data
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      APP_CORS_ORIGINS: ${APP_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost}
+      APP_API_HOST: 0.0.0.0
+      APP_API_PORT: 8000
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env for production}
+      APP_TOKEN_TTL_HOURS: ${APP_TOKEN_TTL_HOURS:-12}
+      APP_ALLOW_SIGNUP: ${APP_ALLOW_SIGNUP:-1}
+      APP_STR_FILE_TTL_HOURS: ${APP_STR_FILE_TTL_HOURS:-24}
+      # LLM providers (Groq)
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      - backend-data:/app/data
+      # Mount the police dataset (read-only) for server-side folder ingestion:
+      # - /path/to/Dataset\ ERakshak_Cleaned:/data:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    profiles: ["proxy"]
+
+  neo4j:
+    image: neo4j:5.20.0
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+
+volumes:
+  backend-data:
+  neo4j-data:

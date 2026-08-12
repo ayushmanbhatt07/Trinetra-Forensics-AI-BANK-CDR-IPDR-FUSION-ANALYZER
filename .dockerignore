@@ -1,0 +1,16 @@
+# Keep the build context small: no tests, git, data, or local secrets in the image
+tests/
+data/
+legacy_archive/
+.git/
+.gitignore
+*.md
+DEPLOYMENT.md
+backend/.env
+frontend/.env.local
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+.idea/
