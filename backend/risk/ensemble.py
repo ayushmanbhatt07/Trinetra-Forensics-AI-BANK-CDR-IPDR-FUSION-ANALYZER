@@ -33,7 +33,7 @@ from .features import ACCOUNT_FEATURES, account_features, _safe_log1p
 logger = logging.getLogger(__name__)
 
 UNSUPERVISED_DETECTORS = (
-    "isolation_forest", "lof", "dbscan", "hdbscan", "one_class_svm", "pca",
+    "isolation_forest",
     "zscore",
 )
 SUPERVISED_DETECTORS = ("random_forest", "xgboost", "lightgbm", "catboost")
@@ -73,50 +73,7 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
     raw[pred == 1] = 0.0
     out["isolation_forest"] = _rank_normalise(raw)
 
-    lof = LocalOutlierFactor(n_neighbors=min(20, max(2, n - 1)),
-                             contamination=0.1, novelty=False)
-    lof.fit_predict(X)
-    out["lof"] = _rank_normalise(-lof.negative_outlier_factor_)
 
-    from sklearn.cluster import DBSCAN
-    db = DBSCAN(eps=1.5, min_samples=5).fit(X)
-    labels = db.labels_
-    core = db.core_sample_indices_
-    raw_db = np.zeros(n)
-    for i in range(n):
-        if labels[i] == -1:
-            d = np.linalg.norm(X - X[i], axis=1)
-            d[i] = np.inf
-            nbr = d[core].min() if len(core) else d.min()
-            raw_db[i] = max(0.0, 3.0 - float(nbr))
-    out["dbscan"] = _rank_normalise(raw_db)
-
-    try:
-        import hdbscan
-        hd = hdbscan.HDBSCAN(min_cluster_size=min(10, max(3, n // 20)),
-                             prediction_data=True)
-        hd.fit(X)
-        raw_hd = getattr(hd, "outlier_scores_", np.zeros(n))
-        if raw_hd is None or len(raw_hd) != n:
-            raw_hd = np.zeros(n)
-        out["hdbscan"] = _rank_normalise(raw_hd)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("hdbscan unavailable: %s", exc)
-
-    from sklearn.svm import OneClassSVM
-    svm = OneClassSVM(nu=0.1, kernel="rbf", gamma="scale")
-    svm.fit(X)
-    out["one_class_svm"] = _rank_normalise(-svm.decision_function(X))
-
-    try:
-        from sklearn.decomposition import PCA
-        k = min(12, max(2, X.shape[1] - 1), n - 1)
-        pca = PCA(n_components=k)
-        proj = pca.fit_transform(X)
-        recon = pca.inverse_transform(proj)
-        out["pca"] = _rank_normalise(np.linalg.norm(X - recon, axis=1))
-    except Exception as exc:  # noqa: BLE001 — degenerate sample/feature count
-        logger.warning("pca unavailable: %s", exc)
 
     z = np.abs((X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9))
     out["zscore"] = _rank_normalise(z.max(axis=1))
