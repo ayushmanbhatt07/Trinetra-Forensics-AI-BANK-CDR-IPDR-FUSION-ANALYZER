@@ -44,7 +44,7 @@ Tri-Netra is built on a modern, high-performance web and data-science stack.
 | **Data Science** | <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/pandas/pandas-original.svg" height="24" align="absmiddle" /> **Pandas** <br> <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/numpy/numpy-original.svg" height="24" align="absmiddle" /> **NumPy** | High-performance memory-mapped tabular data parsing and complex matrix vectorization. **pdfplumber** handles geometric PDF table extraction. |
 | **Machine Learning**| <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/scikitlearn/scikitlearn-original.svg" height="24" align="absmiddle" /> **Scikit-Learn** | Foundation for the massive 11-model Risk Ensemble (Isolation Forest, SVM, DBSCAN, Random Forest) analyzing behavioral metadata. |
 | **Graph AI** | <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/networkx/networkx-original.svg" height="24" align="absmiddle" /> **NetworkX** | In-memory graph processing to calculate centrality, circular flows, and layering hops in real-time. |
-| **Infra & Data** | <img src="https://skillicons.dev/icons?i=docker,nginx,sqlite" height="24" align="absmiddle" /> **Docker & SQLite** | Containerized architecture for seamless local and cloud deployment. **SQLite JSON bundles** provide portable, highly-concurrent state management. |
+| **Infra & Data** | <img src="https://skillicons.dev/icons?i=docker,nginx,sqlite,postgres" height="24" align="absmiddle" /> **Docker, SQLite & PostgreSQL** | Containerized architecture for seamless local and cloud deployment. Supports **PostgreSQL** for production environments (e.g. Render) and **SQLite** for zero-dependency local development. |
 
 ---
 
@@ -192,10 +192,11 @@ graph TD
 
 For an in-depth understanding of the platform's inner workings, refer to the documentation:
 
-* [Architecture Overview](docs/architecture.md)
+* [Project File Map](docs/FILE_MAP.md)
 * [API Reference](docs/api.md)
 * [Data & Entity Model](docs/data-model.md)
 * [Parsers Ecosystem](docs/parsers.md)
+* [Bank Pattern Catalog](docs/bank-pattern-catalog.md)
 * [Canonical Normalization](docs/normalization.md)
 * [Cross-Dataset Fusion](docs/fusion.md)
 * [Risk Engine (Rules + ML)](docs/risk-engine.md)
@@ -204,6 +205,7 @@ For an in-depth understanding of the platform's inner workings, refer to the doc
 * [Deployment Guide](docs/deployment.md)
 * [Attribution & Third-Party Libraries](docs/attribution.md)
 * [Requirements Traceability Matrix](docs/requirements-matrix.md)
+* [Problem Statement](docs/ERH26_PS_03_Problem_Statement.md)
 * [Troubleshooting](docs/troubleshooting.md)
 
 ---
@@ -218,7 +220,7 @@ For an in-depth understanding of the platform's inner workings, refer to the doc
 ```bash
 cd backend
 pip install -r requirements.txt
-uvicorn main:app --reload --port 10000
+uvicorn main:app --reload --port 8000
 ```
 
 ### 2. Start the Frontend
