@@ -7,18 +7,16 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Database, Search, Download, ShieldAlert,
-  FileText, X, Activity, AlertTriangle, Check, Copy, PhoneCall, Loader2
+  FileText, X, Activity, AlertTriangle, Check, Copy, PhoneCall
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
-import { api, isPipelineNotReady, isNoDataLoaded, isNetworkOrWarmupError, type FusedRow } from "@/lib/api";
-import { usePipeline } from "@/lib/pipeline-context";
+import { api, type FusedRow } from "@/lib/api";
 
 const PAGE_SIZE = 50;
 
@@ -31,16 +29,14 @@ const riskStyle = (score: number) => {
 };
 
 export function FusedSection() {
-  const { pipeline, isFusedReady, isProcessing } = usePipeline();
   const [rows, setRows] = useState<FusedRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [q, setQ] = useState("");
   const [account, setAccount] = useState("");
-  const [mode, setMode] = useState("all");
   const [riskAnnotate, setRiskAnnotate] = useState(true);
   const [fusedLoading, setFusedLoading] = useState(true);
-  const [warmupError, setWarmupError] = useState(false);
+  const [fusedKey, setFusedKey] = useState(0);
 
   const [selectedRow, setSelectedRow] = useState<FusedRow | null>(null);
   const [copied, setCopied] = useState(false);
@@ -49,40 +45,31 @@ export function FusedSection() {
 
   const loadFused = useCallback(() => {
     setFusedLoading(true);
-    setWarmupError(false);
     api
-      .fused(offset, PAGE_SIZE, q, account, mode, riskAnnotate)
+      .fused(offset, PAGE_SIZE, q, account, riskAnnotate)
       .then((res) => {
         setRows(res.rows || []);
         setTotal(res.total ?? 0);
       })
       .catch((error) => {
+        const err = error as { status?: number };
+        if (err.status !== 409) {
+          toast.error("Failed to load fused records. Is the backend running?");
+        }
         setRows([]);
         setTotal(0);
-        if (isPipelineNotReady(error) || isNoDataLoaded(error)) {
-          return;
-        }
-        if (isNetworkOrWarmupError(error)) {
-          setWarmupError(true);
-          return;
-        }
-        toast.error("Failed to load fused records.");
       })
       .finally(() => setFusedLoading(false));
-  }, [offset, q, account, mode, riskAnnotate]);
+  }, [offset, q, account, riskAnnotate]);
 
   useEffect(() => {
-    if (isFusedReady) {
-      loadFused();
-    } else if (!isProcessing) {
-      loadFused();
-    }
-  }, [isFusedReady, isProcessing, loadFused]);
-
+    const t = setTimeout(loadFused, 0);
+    return () => clearTimeout(t);
+  }, [loadFused, fusedKey]);
 
   const downloadFusedCsv = async () => {
     try {
-      await api.fusedCsv(q, account, mode);
+      await api.fusedCsv(q, account);
       toast.success("Fused records CSV export started.");
     } catch (e) {
       toast.error((e as { message?: string })?.message ?? "Failed to export CSV.");
@@ -150,62 +137,29 @@ export function FusedSection() {
           <div className="relative min-w-[220px] flex-1">
             <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
             <Input
-              className="pl-8 bg-background border-border/50 text-foreground"
+              className="pl-8"
               placeholder="Search transaction id, account, customer, phone..."
               value={q}
               onChange={(e) => { setQ(e.target.value); setOffset(0); }}
             />
           </div>
           <Input
-            className="w-44 bg-background border-border/50 text-foreground"
+            className="w-44"
             placeholder="Account filter"
             value={account}
             onChange={(e) => { setAccount(e.target.value); setOffset(0); }}
           />
-          <Select value={mode} onValueChange={(val) => { setMode(val); setOffset(0); }}>
-            <SelectTrigger className="w-36 bg-background border-border/50 text-foreground">
-              <SelectValue placeholder="Mode" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Modes</SelectItem>
-              <SelectItem value="cash">CASH</SelectItem>
-              <SelectItem value="upi">UPI</SelectItem>
-              <SelectItem value="imps">IMPS</SelectItem>
-              <SelectItem value="neft">NEFT</SelectItem>
-              <SelectItem value="rtgs">RTGS</SelectItem>
-              <SelectItem value="atm">ATM</SelectItem>
-            </SelectContent>
-          </Select>
-          <Button size="sm" variant="secondary" onClick={() => { setOffset(0); loadFused(); }}>
+          <Button size="sm" variant="secondary" onClick={() => { setOffset(0); setFusedKey((k) => k + 1); }}>
             Apply
           </Button>
         </div>
 
         <div className="flex-1 overflow-auto">
-          {pipeline && !isFusedReady && isProcessing ? (
-            <div className="flex h-full flex-col items-center justify-center space-y-4">
-              <Loader2 className="size-8 text-cyan-500 animate-spin" />
-              <p className="text-cyan-500 font-medium text-base">
-                {pipeline.status === "PARSING" ? "Parsing & Normalizing Datasets..." : "Fusing Bank, CDR and IPDR data..."}
-              </p>
-              <p className="text-muted-foreground text-sm max-w-sm text-center">
-                Unifying transaction logs with telecom CDR and IPDR sessions. Fused dataset will appear automatically when ready.
-              </p>
-            </div>
-
-
-          ) : warmupError ? (
-            <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center text-muted-foreground">
-              <Loader2 className="size-6 text-amber-400 animate-spin" />
-              <p className="text-amber-400 font-medium">Connecting to investigation backend...</p>
-              <p className="text-xs">Render service warming up. Retrying automatically.</p>
-            </div>
-          ) : fusedLoading ? (
+          {fusedLoading ? (
             <div className="p-8 text-center text-muted-foreground animate-pulse">Loading fused records...</div>
           ) : rows.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground">No fused records. Ingest bank + CDR + IPDR datasets first.</div>
           ) : (
-
             <table className="w-full text-sm">
               <thead className="sticky top-0 z-10 bg-muted/60 text-muted-foreground">
                 <tr>

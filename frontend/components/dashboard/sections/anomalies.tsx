@@ -5,11 +5,10 @@
  * Full-width alert table, row click = blurred background + centralized
  * explainability card with STR generation.
  */
-import { useState, useEffect, useCallback } from "react";
-
+import { useState, useEffect } from "react";
 import {
   ShieldAlert, FileText, X, Activity, Database,
-  Download, AlertTriangle, Check, Copy, PhoneCall, Loader2
+  Download, AlertTriangle, Check, Copy, PhoneCall,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,8 +16,7 @@ import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
-import { api, isPipelineNotReady, isNoDataLoaded, isNetworkOrWarmupError, type Alert } from "@/lib/api";
-import { usePipeline } from "@/lib/pipeline-context";
+import { api, type Alert } from "@/lib/api";
 
 const riskStyle = (score: number) => {
   if (score >= 86) return { color: "#f43f5e", bg: "bg-rose-500/10 border-rose-500/40" };
@@ -29,10 +27,8 @@ const riskStyle = (score: number) => {
 };
 
 export function AnomaliesSection() {
-  const { pipeline, isAnomaliesReady, isProcessing } = usePipeline();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsLoading, setAlertsLoading] = useState(true);
-  const [warmupError, setWarmupError] = useState(false);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
@@ -46,40 +42,24 @@ export function AnomaliesSection() {
       const info = await api.dossier(kind, value);
       setPanelPayload({ type: "entity", info });
     } catch (e: any) {
-      if (!isNoDataLoaded(e)) toast.error(`No dossier found for ${kind} ${value}`);
+      if (e.status !== 409) toast.error(`No dossier found for ${kind} ${value}`);
     } finally {
       setPanelBusy(false);
     }
   };
 
-  const fetchAlerts = useCallback(() => {
+  useEffect(() => {
     setAlertsLoading(true);
-    setWarmupError(false);
     api.alerts(50, 200)
-      .then((res) => {
-        setAlerts(res.results || []);
-      })
+      .then((res) => setAlerts(res.results || []))
       .catch((error) => {
-        setAlerts([]);
-        if (isPipelineNotReady(error) || isNoDataLoaded(error)) {
-          return;
+        const err = error as { status?: number };
+        if (err.status !== 409) {
+          toast.error("Failed to load anomaly alerts. Is the backend running?");
         }
-        if (isNetworkOrWarmupError(error)) {
-          setWarmupError(true);
-          return;
-        }
-        toast.error("Failed to load anomaly alerts.");
       })
       .finally(() => setAlertsLoading(false));
   }, []);
-
-  useEffect(() => {
-    if (isAnomaliesReady) {
-      fetchAlerts();
-    } else if (!isProcessing) {
-      fetchAlerts();
-    }
-  }, [isAnomaliesReady, isProcessing, fetchAlerts]);
 
   const downloadSTR = async () => {
     try {
@@ -103,61 +83,26 @@ export function AnomaliesSection() {
     <div className="space-y-6 h-[calc(100vh-12rem)]">
       <div className="flex h-full flex-col rounded-xl border border-border/70 bg-card/60 backdrop-blur">
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-          {pipeline && !isAnomaliesReady && isProcessing ? (
-            <Badge variant="outline" className="border-amber-500/40 text-amber-400 bg-amber-500/10">
-              <Loader2 className="mr-1 size-3.5 animate-spin" /> AI Risk Scoring in Progress
-            </Badge>
-          ) : (
-            <Badge variant="outline" className="border-rose-500/40 text-rose-400 bg-rose-500/10">
-              <ShieldAlert className="mr-1 size-3.5" /> High Risk Feed ({alerts.length})
-            </Badge>
-          )}
-          <div className="ml-auto flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="bg-red-600 text-white hover:bg-red-700 border-none"
-              onClick={downloadSTR}
-            >
+          <ShieldAlert className="size-5 text-red-500" />
+          <div className="min-w-[200px] flex-1">
+            <p className="text-sm font-semibold text-red-500">Anomaly Detection Feed</p>
+            <p className="text-xs text-muted-foreground">
+              {alerts.length} highest-risk transactions · click a row for full explainability + STR
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={downloadSTR}>
               <FileText className="mr-1 size-4" /> STR
             </Button>
           </div>
         </div>
 
         <div className="flex-1 overflow-auto">
-          {pipeline && !isAnomaliesReady && isProcessing ? (
-            <div className="flex h-full flex-col items-center justify-center space-y-4">
-              <Loader2 className="size-8 text-rose-500 animate-spin" />
-              <p className="text-rose-500 font-medium text-base">
-                {pipeline.status === "PARSING" ? "Parsing & Normalizing Datasets..." : 
-                 pipeline.status === "FUSING" ? "Fusing Bank, CDR and IPDR Records..." :
-                 pipeline.status === "SCORING" ? "AI Risk Scoring in Progress..." : "Building Analytics..."}
-              </p>
-              <p className="text-muted-foreground text-sm max-w-sm text-center">
-                Computing behavioral profiles, ML ensemble models, and fraud heat.
-                Anomaly records will appear automatically when scoring completes.
-              </p>
-            </div>
-          ) : pipeline?.status === "ERROR" || pipeline?.error ? (
-            <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center">
-              <AlertTriangle className="size-8 text-red-500" />
-              <p className="text-red-500 font-medium">Pipeline Execution Failed</p>
-              <p className="text-xs text-muted-foreground max-w-md">{pipeline.error || "Scoring pipeline encountered an unexpected error."}</p>
-            </div>
-          ) : warmupError ? (
-            <div className="flex h-full flex-col items-center justify-center space-y-3 p-8 text-center text-muted-foreground">
-              <Loader2 className="size-6 text-amber-400 animate-spin" />
-              <p className="text-amber-400 font-medium">Connecting to investigation backend...</p>
-              <p className="text-xs">Render service warming up. Retrying automatically.</p>
-            </div>
-          ) : alertsLoading ? (
+          {alertsLoading ? (
             <div className="p-8 text-center text-muted-foreground animate-pulse">Loading anomalies...</div>
           ) : alerts.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground">
-              No transaction anomalies above risk score 50 found in current dataset.
-            </div>
+            <div className="p-8 text-center text-muted-foreground">No anomalies above risk 50 found. Ingest data first.</div>
           ) : (
-
             <div className="overflow-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-muted/60 text-muted-foreground z-10">
