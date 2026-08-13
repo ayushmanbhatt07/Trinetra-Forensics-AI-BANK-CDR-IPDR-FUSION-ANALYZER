@@ -168,10 +168,8 @@ def correlate_phones(bundle: dict, window_sec: int = BANK_TXN_WINDOW_SEC) -> dic
         a = r.get("a_number") or ""
         if a and r.get("ts"):
             cdr_by_a[a].append(r)
-    cdr_keys: dict[str, list[float]] = {}
     for ph in cdr_by_a:
         cdr_by_a[ph].sort(key=lambda x: x["ts"])
-        cdr_keys[ph] = [c["ts"] for c in cdr_by_a[ph]]
     phones = phone_analysis(bundle.get("cdr", []))
     hits = []
     for r in bundle.get("bank", []):
@@ -182,7 +180,7 @@ def correlate_phones(bundle: dict, window_sec: int = BANK_TXN_WINDOW_SEC) -> dic
         window = []
         if txn_ts:
             c_list = cdr_by_a[ph]
-            keys = cdr_keys[ph]
+            keys = [c["ts"] for c in c_list]
             idx_start = bisect.bisect_left(keys, txn_ts - window_sec)
             idx_end = bisect.bisect_right(keys, txn_ts + window_sec)
             for c in c_list[idx_start:idx_end]:
@@ -344,9 +342,9 @@ def rapid_payouts(bundle: dict, threshold: int = 5, window_min: int = 60) -> lis
     out = []
     for acc, rs in by_acc.items():
         rs.sort(key=lambda r: r["ts"])
-        i, j, n = 0, 0, len(rs)
-        while i < n:
-            while j < n and rs[j]["ts"] - rs[i]["ts"] <= window_min * 60:
+        for i in range(len(rs)):
+            j = i
+            while j < len(rs) and rs[j]["ts"] - rs[i]["ts"] <= window_min * 60:
                 j += 1
             if j - i >= threshold:
                 out.append({
@@ -360,7 +358,6 @@ def rapid_payouts(bundle: dict, threshold: int = 5, window_min: int = 60) -> lis
                               "mode": r.get("mode")} for r in rs[i:j]][:15],
                 })
                 break
-            i += 1
     out.sort(key=lambda x: -x["count"])
     return out
 
@@ -395,33 +392,20 @@ def circular_flows(bundle: dict, min_amount: float = 10000,
     g = g.subgraph(keep).copy()
 
     out = []
-    
-    def dfs(start, current, path):
-        if len(out) >= cap or len(path) > max_len:
-            return
-            
-        for nxt in g.successors(current):
-            if nxt == start and len(path) >= 2:
-                cyc = list(path)
-                edges = list(zip(cyc, cyc[1:] + cyc[:1]))
-                min_amt = min(g[u][v]["amount"] for u, v in edges)
-                total = sum(g[u][v]["amount"] for u, v in edges)
-                out.append({
-                    "accounts": cyc,
-                    "length": len(cyc),
-                    "total_flow": round(total, 2),
-                    "min_leg": round(min_amt, 2),
-                })
-            elif nxt > start and nxt not in path:
-                path.append(nxt)
-                dfs(start, nxt, path)
-                path.pop()
-
-    for node in g.nodes():
-        dfs(node, node, [node])
+    for cyc in itertools.islice(nx.simple_cycles(g), 5000):
+        if len(cyc) < 2 or len(cyc) > max_len:
+            continue
+        edges = list(zip(cyc, cyc[1:] + cyc[:1]))
+        min_amt = min(g[u][v]["amount"] for u, v in edges)
+        total = sum(g[u][v]["amount"] for u, v in edges)
+        out.append({
+            "accounts": cyc,
+            "length": len(cyc),
+            "total_flow": round(total, 2),
+            "min_leg": round(min_amt, 2),
+        })
         if len(out) >= cap:
             break
-
     out.sort(key=lambda x: -x["total_flow"])
     return out
 
@@ -440,27 +424,22 @@ def rapid_in_out(bundle: dict, window_min: int = 15) -> list[dict]:
     out = []
     for acc, rs in by_acc.items():
         rs.sort(key=lambda r: r["ts"])
-        debits = [(r["ts"], r.get("debit") or 0, r) for r in rs if (r.get("debit") or 0) > 0]
-        debit_tss = [d[0] for d in debits]
-        
-        for i, r in enumerate(rs):
-            c = r.get("credit") or 0
+        for i in range(len(rs)):
+            c, d = rs[i].get("credit") or 0, rs[i].get("debit") or 0
             if c <= 0:
                 continue
-            ts = r["ts"]
-            idx = bisect.bisect_right(debit_tss, ts)
-            for j in range(idx, len(debits)):
-                d_ts, d_val, d_r = debits[j]
-                if d_ts - ts > window_min * 60:
+            for j in range(i + 1, len(rs)):
+                if rs[j]["ts"] - rs[i]["ts"] > window_min * 60:
                     break
-                if d_val >= c * 0.95:
+                outd = rs[j].get("debit") or 0
+                if outd > 0 and outd >= c * 0.95:
                     out.append({
                         "account_no": acc,
-                        "in_ts": ts, "out_ts": d_ts,
+                        "in_ts": rs[i]["ts"], "out_ts": rs[j]["ts"],
                         "window_min": window_min,
-                        "in_amount": c, "out_amount": d_val,
-                        "in_txn": r.get("txn_id"), "out_txn": d_r.get("txn_id"),
-                        "mode": r.get("mode") or d_r.get("mode"),
+                        "in_amount": c, "out_amount": outd,
+                        "in_txn": rs[i].get("txn_id"), "out_txn": rs[j].get("txn_id"),
+                        "mode": rs[i].get("mode") or rs[j].get("mode"),
                     })
                     break
     out.sort(key=lambda x: x["out_ts"] - x["in_ts"])
@@ -486,24 +465,12 @@ def search_bundle(bundle: dict, q: str, limit: int = 50) -> dict:
         results.append({"kind": kind, "key": key, "label": label,
                         **(extra or {})})
 
-    account_stats = bundle.get("_account_stats")
-    if account_stats is None:
-        account_stats = {}
-        for r in bank:
-            acc = r.get("account_no")
-            if acc:
-                st = account_stats.setdefault(acc, {"count": 0, "bank": r.get("bank"), "holder": r.get("holder")})
-                st["count"] += 1
-                if not st["bank"]: st["bank"] = r.get("bank")
-                if not st["holder"]: st["holder"] = r.get("holder")
-        bundle["_account_stats"] = account_stats
-
     for acct in entities.get("accounts") or []:
         if q in str(acct).lower():
-            st = account_stats.get(acct, {})
-            hit("account", acct, f"Account {acct} · {st.get('bank') or ''} "
-                f"· {st.get('holder') or ''}",
-                {"txns": st.get("count", 0)})
+            txn = next((r for r in bank if r.get("account_no") == acct), {})
+            hit("account", acct, f"Account {acct} · {txn.get('bank') or ''} "
+                f"· {txn.get('holder') or ''}",
+                {"txns": sum(1 for r in bank if r.get("account_no") == acct)})
     for ph in entities.get("phones") or []:
         if q in str(ph).lower():
             hit("phone", ph, f"Phone {ph}")
@@ -545,14 +512,7 @@ def search_bundle(bundle: dict, q: str, limit: int = 50) -> dict:
 
 def _fuse_norm10(phone) -> str:
     """Last-10-digits phone normaliser shared by the fused-table linker."""
-    if not phone:
-        return ""
-    if type(phone) is int:
-        digits = str(phone)
-    else:
-        digits = str(phone)
-        if not digits.isdigit():
-            digits = "".join(filter(str.isdigit, digits))
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
     if len(digits) >= 12 and digits.startswith("91"):
         digits = digits[2:]
     return digits[-10:] if len(digits) >= 10 else ""
@@ -690,21 +650,16 @@ def cached_fused_base(bundle: dict) -> list[dict]:
         return result
 
 def fused_table(bundle: dict, offset: int = 0, limit: int = 100,
-                q: str = "", account: str = "", mode: str = "", scored: dict | None = None) -> dict:
+                q: str = "", account: str = "", scored: dict | None = None) -> dict:
     base_rows = cached_fused_base(bundle)
     q_low = (q or "").strip().lower()
     account_low = (account or "").strip().lower()
-    mode_low = (mode or "").strip().lower()
     
-    if q_low or account_low or mode_low:
+    if q_low or account_low:
         kept = []
         for row in base_rows:
             if account_low and account_low not in str(row["account_no"]).lower():
                 continue
-            if mode_low:
-                m = str(row.get("mode") or "").strip().lower()
-                if mode_low not in m:
-                    continue
             if q_low:
                 hay = " ".join(str(row.get(k) or "") for k in (
                     "transaction_id", "account_no", "account_name",
@@ -747,21 +702,28 @@ def cached_fraud_heat(bundle: dict) -> dict:
     hit = _fusion_cache.get(key)
     if hit is not None:
         return hit
-    result = fraud_heat(bundle)
+        
     with _fusion_cache_lock:
+        hit = _fusion_cache.get(key)
+        if hit is not None:
+            return hit
+        result = fraud_heat(bundle)
         _fusion_cache[key] = result
-    return result
+        return result
 
 def cached_build_timeline(bundle: dict) -> list[dict]:
     key = ("build_timeline", _fingerprint(bundle))
     hit = _fusion_cache.get(key)
     if hit is not None:
         return hit
-    result = build_timeline(bundle)
+        
     with _fusion_cache_lock:
+        hit = _fusion_cache.get(key)
+        if hit is not None:
+            return hit
+        result = build_timeline(bundle)
         _fusion_cache[key] = result
-    return result
-
+        return result
 
 def clear_fusion_cache() -> None:
     with _fusion_cache_lock:

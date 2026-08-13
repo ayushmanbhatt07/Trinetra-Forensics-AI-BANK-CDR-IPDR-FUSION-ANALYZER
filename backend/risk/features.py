@@ -415,10 +415,8 @@ def txn_ml_scores(bundle: dict, cap_z: float = 8.0) -> dict[str, float]:
         return {}
     std = mat.std(axis=0)
     std[std == 0] = 1.0
-    z = np.abs((mat - np.nanmean(mat, axis=0)) / std)
-    z = np.nan_to_num(z, nan=0.0)
+    z = np.abs((mat - mat.mean(axis=0)) / std)
     z = np.minimum(z, cap_z)
     magnitude = np.clip((z.max(axis=1) - 2.0) * (100.0 / 6.0), 0.0, 100.0)
-    magnitude = np.nan_to_num(magnitude, nan=0.0)
     return {r["txn_id"]: round(float(magnitude[i]), 2)
             for i, r in enumerate(rows) if r["txn_id"]}

@@ -76,16 +76,21 @@ def _fingerprint(bundle: dict) -> tuple:
 
 def _fetch(bundle: dict) -> dict:
     key = _CACHE_KEY + ":" + repr(_fingerprint(bundle))
+    # Fast path: check cache without lock
     hit = _cache.get(key)
     if hit is not None:
         return hit
     
-    # Compute OUTSIDE lock so concurrent HTTP requests never block
-    result = _compute(bundle)
+    # Cache miss: acquire lock and compute
     with _cache_lock:
+        # Check again in case another thread already computed it
+        hit = _cache.get(key)
+        if hit is not None:
+            return hit
+            
+        result = _compute(bundle)
         _cache[key] = result
-    return result
-
+        return result
 
 
 def _compute(bundle: dict) -> dict:
@@ -252,22 +257,10 @@ def _compute(bundle: dict) -> dict:
                 "reasons": ent["reasons"],
             }
 
-    transactions_sorted = list(transactions.values())
-    transactions_sorted.sort(key=lambda r: (-r["risk_score"], r.get("risk_band", "")))
-    
-    accounts_sorted = list(accounts.values())
-    accounts_sorted.sort(key=lambda r: -r["risk_score"])
-    
-    entities_sorted = list(entities.values())
-    entities_sorted.sort(key=lambda r: -r["risk_score"])
-
     return {
         "transactions": transactions,
-        "transactions_sorted": transactions_sorted,
         "accounts": accounts,
-        "accounts_sorted": accounts_sorted,
         "entities": entities,
-        "entities_sorted": entities_sorted,
         "scenarios": scenarios,
         "entity_risk": entity,
         "stats": {
@@ -330,7 +323,8 @@ def hybrid_analyze_fast(bundle: dict) -> dict | None:
 def hybrid_transaction_risk(bundle: dict, min_score: float = 0.0) -> list[dict]:
     """Hybrid per-transaction risk, sorted descending (cache-aware)."""
     res = _fetch(bundle)
-    rows = res["transactions_sorted"]
+    rows = list(res["transactions"].values())
+    rows.sort(key=lambda r: (-r["risk_score"], r.get("risk_band", "")))
     if min_score > 0:
         rows = [r for r in rows if r["risk_score"] >= min_score]
     return rows
@@ -338,12 +332,16 @@ def hybrid_transaction_risk(bundle: dict, min_score: float = 0.0) -> list[dict]:
 
 def hybrid_account_risk(bundle: dict) -> list[dict]:
     res = _fetch(bundle)
-    return res["accounts_sorted"]
+    rows = list(res["accounts"].values())
+    rows.sort(key=lambda r: -r["risk_score"])
+    return rows
 
 
 def hybrid_entity_risk(bundle: dict) -> list[dict]:
     res = _fetch(bundle)
-    return res["entities_sorted"]
+    rows = list(res["entities"].values())
+    rows.sort(key=lambda r: -r["risk_score"])
+    return rows
 
 
 def explanations_for_txn(bundle: dict, txn_id: str) -> dict:
