@@ -46,7 +46,18 @@ DEFAULTS = {
     "DETECT_MIN_CONFIDENCE": "0.55",
     "ANOMALY_CONTAMINATION": "0.05",
     "MAX_UPLOAD_FILES": "50",
+    "DATABASE_URL": "",
 }
+
+
+def database_url() -> str:
+    # First check standard DATABASE_URL (Render style)
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url.strip()
+    # Then check APP_DATABASE_URL
+    return _get("DATABASE_URL", "").strip()
+
 
 
 def _get(key: str, default: str | None = None) -> str:
@@ -117,7 +128,7 @@ def ingest_timeout_sec() -> int:
 
 
 def parser_threads() -> int:
-    return max(1, _int("PARSER_THREADS", 4))
+    return max(1, _int("PARSER_THREADS", 1))
 
 
 def detect_min_confidence() -> float:
