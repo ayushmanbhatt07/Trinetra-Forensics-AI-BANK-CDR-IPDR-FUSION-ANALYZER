@@ -70,7 +70,7 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
     def _isolation_forest():
         from sklearn.ensemble import IsolationForest
         forest = IsolationForest(n_estimators=100, contamination=0.1,
-                                 random_state=42, n_jobs=-1)
+                                 random_state=42, n_jobs=1)
         pred = forest.fit_predict(X)
         raw = -forest.score_samples(X)
         raw[pred == 1] = 0.0
