@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { Header } from "@/components/dashboard/header";
 import { OverviewSection } from "@/components/dashboard/sections/overview";
@@ -21,6 +21,15 @@ export default function Dashboard() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [strTransactionId, setStrTransactionId] = useState<string | null>(null);
   const [showIngestPrompt, setShowIngestPrompt] = useState(false);
+
+  const handleCloseStr = useCallback(() => {
+    setStrTransactionId(null);
+  }, []);
+
+  const handleOpenIngestion = useCallback(() => {
+    setActiveSection("ingestion");
+    setShowIngestPrompt(false);
+  }, []);
 
   useEffect(() => {
     const handleNav = (e: Event) => {
@@ -54,30 +63,6 @@ export default function Dashboard() {
     };
   }, []);
 
-  const renderSection = () => {
-    switch (activeSection) {
-      case "overview":
-        return <OverviewSection />;
-      case "ingestion":
-        return <IngestionSection />;
-      case "network":
-        return <NetworkSection />;
-      case "fused":
-        return <FusedSection />;
-      case "anomalies":
-        return <AnomaliesSection />;
-      case "timeline":
-        return <TimelineSection />;
-      case "reports":
-        return <ReportsSection />;
-      case "settings":
-        return <SettingsSection />;
-      case "search":
-        return <SearchSection />;
-      default:
-        return <OverviewSection />;
-    }
-  };
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -94,19 +79,44 @@ export default function Dashboard() {
       >
         <Header activeSection={activeSection} />
         <main className="flex-1 p-6 overflow-auto">
-          <div
-            key={activeSection}
-            className="animate-in fade-in slide-in-from-bottom-4 duration-500"
-          >
-            {renderSection()}
+          {/* Sections are kept MOUNTED at all times to preserve fetched data and
+              prevent the pipeline-context loading race on navigation.
+              React.memo on each section prevents inactive sections from re-rendering. */}
+          <div style={{ display: activeSection === "overview" ? "block" : "none" }}>
+            <OverviewSection />
           </div>
+          <div style={{ display: activeSection === "ingestion" ? "block" : "none" }}>
+            <IngestionSection />
+          </div>
+          <div style={{ display: activeSection === "network" ? "block" : "none" }}>
+            <NetworkSection />
+          </div>
+          <div style={{ display: activeSection === "fused" ? "block" : "none" }}>
+            <FusedSection />
+          </div>
+          <div style={{ display: activeSection === "anomalies" ? "block" : "none" }}>
+            <AnomaliesSection />
+          </div>
+          <div style={{ display: activeSection === "timeline" ? "block" : "none" }}>
+            <TimelineSection />
+          </div>
+          <div style={{ display: activeSection === "reports" ? "block" : "none" }}>
+            <ReportsSection />
+          </div>
+          <div style={{ display: activeSection === "settings" ? "block" : "none" }}>
+            <SettingsSection />
+          </div>
+          <div style={{ display: activeSection === "search" ? "block" : "none" }}>
+            <SearchSection />
+          </div>
+
         </main>
       </div>
 
       {strTransactionId && (
         <TransactionSTRReport 
           transactionId={strTransactionId} 
-          onClose={() => setStrTransactionId(null)} 
+          onClose={handleCloseStr} 
         />
       )}
 
@@ -125,10 +135,7 @@ export default function Dashboard() {
               NO DATA LOADED
             </h2>
             <button
-              onClick={() => {
-                setActiveSection("ingestion");
-                setShowIngestPrompt(false);
-              }}
+              onClick={handleOpenIngestion}
               className="group relative overflow-hidden rounded-full border border-emerald-500/50 bg-emerald-950/40 px-10 py-4 font-mono font-bold text-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.3)] transition-all hover:scale-105 hover:bg-emerald-900/50 hover:shadow-[0_0_30px_rgba(52,211,153,0.6)]"
             >
               <div className="absolute inset-0 -translate-x-full animate-[shimmer_2s_infinite] bg-gradient-to-r from-transparent via-emerald-400/10 to-transparent"></div>

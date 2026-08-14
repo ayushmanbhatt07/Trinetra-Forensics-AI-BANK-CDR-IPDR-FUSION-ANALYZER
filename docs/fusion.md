@@ -22,3 +22,7 @@ Entities are linked across domains via shared attributes:
 
 ## 4. Graph Construction
 Once entities are linked, the Fusion Engine feeds the relationships to the Graph Engine (`backend/graphs.py`), constructing the underlying `NetworkX` topology that powers the UI visualizations.
+
+## 5. Centralized Stage-Aware Synchronization & Data Propagation
+- **Stage Readiness Pipeline**: Fusion completion (`FUSED_READY`), scoring completion (`ANOMALIES_READY`), graph building (`GRAPHS_READY`), and final completion (`READY`) emit distinct status flags.
+- **Push Invalidation**: React frontend components (`Overview`, `Timeline`, `Network Graph`, `Search`, `Reports`) bind directly to stage readiness booleans, ensuring downstream data updates instantly without manual page reloads or cross-run data leakage.

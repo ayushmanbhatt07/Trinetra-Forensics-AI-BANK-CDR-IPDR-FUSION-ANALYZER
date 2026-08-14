@@ -1,15 +1,18 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useCallback, ReactNode } from "react";
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo, ReactNode } from "react";
 import { api, type PipelineStatus } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { prefetchAlerts } from "@/components/dashboard/sections/anomalies";
 
 interface PipelineContextType {
   pipeline: PipelineStatus | null;
+  /** True until the FIRST pipeline-status poll has completed */
   loading: boolean;
   refetchPipeline: () => Promise<void>;
   isFusedReady: boolean;
   isAnomaliesReady: boolean;
+  isGraphReady: boolean;
   isReady: boolean;
   isProcessing: boolean;
   isError: boolean;
@@ -21,26 +24,54 @@ const PipelineContext = createContext<PipelineContextType>({
   refetchPipeline: async () => {},
   isFusedReady: false,
   isAnomaliesReady: false,
+  isGraphReady: false,
   isReady: false,
   isProcessing: false,
   isError: false,
 });
 
+// Stage-aware constant sets defined once at module scope to avoid re-allocation
+const FUSED_STAGES = new Set(["FUSED_READY", "SCORING", "ANOMALIES_READY", "GRAPHS", "READY"]);
+const ANOMALY_STAGES = new Set(["ANOMALIES_READY", "GRAPHS", "READY"]);
+const GRAPH_STAGES = new Set(["GRAPHS", "READY"]);
+const PROCESSING_STAGES = new Set(["PARSING", "FUSING", "SCORING", "GRAPHS"]);
+const TERMINAL_STAGES = new Set(["IDLE", "ERROR", "READY", "CANCELLED"]);
+
+function isSamePipelineStatus(prev: PipelineStatus | null, next: PipelineStatus | null): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.status === next.status &&
+    prev.progress === next.progress &&
+    prev.ready === next.ready &&
+    prev.fused_ready === next.fused_ready &&
+    prev.anomalies_ready === next.anomalies_ready &&
+    prev.graphs_ready === next.graphs_ready &&
+    prev.dataset_id === next.dataset_id &&
+    prev.job_id === next.job_id &&
+    prev.error === next.error
+  );
+}
+
 export function PipelineProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const [pipeline, setPipeline] = useState<PipelineStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pollTrigger, setPollTrigger] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const isActiveRef = useRef(true);
+  const lastPrefetchedStageRef = useRef<string>("");
 
   const fetchStatus = useCallback(async () => {
     if (!user) {
-      setPipeline(null);
+      setPipeline((prev) => (prev === null ? prev : null));
       setLoading(false);
       return;
     }
     try {
       const res = await api.pipelineStatus();
-      setPipeline(res);
-    } catch (e) {
+      setPipeline((prev) => (isSamePipelineStatus(prev, res) ? prev : res));
+    } catch {
       // Don't clear pipeline on intermittent network error
     } finally {
       setLoading(false);
@@ -48,67 +79,122 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   useEffect(() => {
-    let isActive = true;
-    let timer: number | undefined;
+    isActiveRef.current = true;
 
     const poll = async () => {
-      if (!user) return;
+      if (!user) {
+        setLoading(false);
+        return;
+      }
       try {
         const res = await api.pipelineStatus();
-        if (!isActive) return;
-        setPipeline(res);
+        if (!isActiveRef.current) return;
+        setPipeline((prev) => (isSamePipelineStatus(prev, res) ? prev : res));
         setLoading(false);
 
-        // Continue polling if actively processing
-        if (res && !res.ready && res.status !== "IDLE" && res.status !== "ERROR") {
-          timer = window.setTimeout(poll, 2000);
+        // Proactive background prefetching ONCE when stage transitions
+        const stageKey = `${res.job_id || "default"}:${res.status}`;
+        if (lastPrefetchedStageRef.current !== stageKey) {
+          lastPrefetchedStageRef.current = stageKey;
+          if (res.anomalies_ready || ANOMALY_STAGES.has(res.status)) {
+            prefetchAlerts(res.job_id).catch(() => {});
+          }
+          if (res.fused_ready || FUSED_STAGES.has(res.status)) {
+            api.summary().catch(() => {});
+          }
         }
-      } catch (e) {
-        if (!isActive) return;
+
+        // Only continue polling if actively processing (not yet at a terminal state)
+        const isTerminal =
+          !res ||
+          res.ready ||
+          TERMINAL_STAGES.has(res.status);
+
+        if (!isTerminal) {
+          // Fast responsive polling during active processing stages (PARSING, FUSING, SCORING, GRAPHS)
+          const interval = 600;
+          timerRef.current = setTimeout(poll, interval);
+        }
+      } catch {
+        if (!isActiveRef.current) return;
         setLoading(false);
-        timer = window.setTimeout(poll, 5000);
+        // On error, retry in 3000ms
+        timerRef.current = setTimeout(poll, 3000);
       }
     };
 
     poll();
 
     return () => {
-      isActive = false;
-      if (timer !== undefined) clearTimeout(timer);
+      isActiveRef.current = false;
+      if (timerRef.current !== undefined) clearTimeout(timerRef.current);
     };
-  }, [user]);
+  }, [user, pollTrigger]);
 
   const refetchPipeline = useCallback(async () => {
+    setPollTrigger((t) => t + 1);
     await fetchStatus();
   }, [fetchStatus]);
 
-  const isFusedReady = Boolean(
-    pipeline?.fused_ready ||
-    (pipeline && ["FUSED_READY", "SCORING", "ANOMALIES_READY", "GRAPHS", "READY"].includes(pipeline.status))
+  // Stage-aware derived booleans memoized against pipeline status
+  const isFusedReady = useMemo(
+    () => Boolean(pipeline?.fused_ready || (pipeline && FUSED_STAGES.has(pipeline.status))),
+    [pipeline]
   );
 
-  const isAnomaliesReady = Boolean(
-    pipeline?.anomalies_ready ||
-    (pipeline && ["ANOMALIES_READY", "GRAPHS", "READY"].includes(pipeline.status))
+  const isAnomaliesReady = useMemo(
+    () => Boolean(pipeline?.anomalies_ready || (pipeline && ANOMALY_STAGES.has(pipeline.status))),
+    [pipeline]
   );
 
-  const isReady = Boolean(pipeline?.ready || pipeline?.status === "READY");
-  const isProcessing = Boolean(pipeline && ["PARSING", "FUSING", "SCORING", "GRAPHS"].includes(pipeline.status));
-  const isError = Boolean(pipeline?.status === "ERROR");
+  const isGraphReady = useMemo(
+    () => Boolean(pipeline && GRAPH_STAGES.has(pipeline.status)),
+    [pipeline]
+  );
+
+  const isReady = useMemo(
+    () => Boolean(pipeline?.ready || pipeline?.status === "READY"),
+    [pipeline]
+  );
+
+  const isProcessing = useMemo(
+    () => Boolean(!loading && pipeline && PROCESSING_STAGES.has(pipeline.status)),
+    [loading, pipeline]
+  );
+
+  const isError = useMemo(
+    () => Boolean(pipeline?.status === "ERROR"),
+    [pipeline]
+  );
+
+  // Stable memoized context value object to prevent broadcasting re-renders to all consumers
+  const value = useMemo(
+    () => ({
+      pipeline,
+      loading,
+      refetchPipeline,
+      isFusedReady,
+      isAnomaliesReady,
+      isGraphReady,
+      isReady,
+      isProcessing,
+      isError,
+    }),
+    [
+      pipeline,
+      loading,
+      refetchPipeline,
+      isFusedReady,
+      isAnomaliesReady,
+      isGraphReady,
+      isReady,
+      isProcessing,
+      isError,
+    ]
+  );
 
   return (
-    <PipelineContext.Provider
-      value={{
-        pipeline,
-        loading,
-        refetchPipeline,
-        isFusedReady,
-        isAnomaliesReady,
-        isReady,
-        isProcessing,
-        isError,
-      }}
-    >
+    <PipelineContext.Provider value={value}>
       {children}
     </PipelineContext.Provider>
   );

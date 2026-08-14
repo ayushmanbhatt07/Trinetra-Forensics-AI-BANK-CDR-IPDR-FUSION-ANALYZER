@@ -650,15 +650,22 @@ def cached_fused_base(bundle: dict) -> list[dict]:
         return result
 
 def fused_table(bundle: dict, offset: int = 0, limit: int = 100,
-                q: str = "", account: str = "", scored: dict | None = None) -> dict:
+                q: str = "", account: str = "", mode: str = "", scored: dict | None = None,
+                date_start: str = "", date_end: str = "", min_amount: float = 0.0,
+                max_amount: float = 0.0, risk_band: str = "") -> dict:
     base_rows = cached_fused_base(bundle)
     q_low = (q or "").strip().lower()
     account_low = (account or "").strip().lower()
+    mode_low = (mode or "").strip().lower()
+    risk_low = (risk_band or "").strip().lower()
+
     
-    if q_low or account_low:
+    if True: # Always run filter pass to apply the advanced filters
         kept = []
         for row in base_rows:
             if account_low and account_low not in str(row["account_no"]).lower():
+                continue
+            if mode_low and mode_low != "all" and mode_low not in str(row.get("mode", "")).lower():
                 continue
             if q_low:
                 hay = " ".join(str(row.get(k) or "") for k in (
@@ -667,9 +674,31 @@ def fused_table(bundle: dict, offset: int = 0, limit: int = 100,
                     "sender_phone", "receiver_phone", "bank")).lower()
                 if q_low not in hay:
                     continue
+                    
+            # --- New Advanced Filters ---
+            
+            # Date filtering
+            r_date = str(row.get("date") or "")
+            if date_start and r_date < date_start:
+                continue
+            if date_end and r_date > date_end:
+                continue
+                
+            # Amount filtering
+            r_amt = float(row.get("amount") or 0.0)
+            if min_amount > 0 and r_amt < min_amount:
+                continue
+            if max_amount > 0 and r_amt > max_amount:
+                continue
+                
+            # Risk band filtering (requires scored dict)
+            if risk_low and risk_low != "all":
+                s = (scored or {}).get(row["transaction_id"]) or {}
+                r_band = str(s.get("risk_band") or "SAFE").lower()
+                if risk_low != r_band:
+                    continue
+                    
             kept.append(row)
-    else:
-        kept = base_rows
 
     total = len(kept)
     page_rows = [dict(r) for r in kept[offset:offset + limit]]

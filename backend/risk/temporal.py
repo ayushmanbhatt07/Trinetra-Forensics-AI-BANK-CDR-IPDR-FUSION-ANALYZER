@@ -35,8 +35,14 @@ def _is_call(r: dict) -> bool:
     return int(r.get("duration_sec") or 0) >= _CALL_MIN_DUR
 
 
+_INDEX_CACHE = {}
+
 def build_temporal_index(bundle: dict) -> dict:
     """Sorted timestamp index per phone / IMSI / IMEI for CDR + IPDR."""
+    key = id(bundle)
+    if key in _INDEX_CACHE:
+        return _INDEX_CACHE[key]
+        
     calls_by_phone: dict[str, list] = defaultdict(list)
     calls_by_imsi: dict[str, list] = defaultdict(list)
     calls_by_imei: dict[str, list] = defaultdict(list)
@@ -67,19 +73,16 @@ def build_temporal_index(bundle: dict) -> dict:
         if r.get("imei"):
             sess_by_imei[r["imei"]].append(ts)
 
-    def _sort(d: dict) -> dict:
-        for k in d:
-            d[k].sort()
-        return d
-
-    return {
-        "calls_phone": _sort(calls_by_phone),
-        "calls_imsi": _sort(calls_by_imsi),
-        "calls_imei": _sort(calls_by_imei),
-        "sess_phone": _sort(sess_by_phone),
-        "sess_imsi": _sort(sess_by_imsi),
-        "sess_imei": _sort(sess_by_imei),
+    out = {
+        "calls_phone": {k: sorted(v) for k, v in calls_by_phone.items()},
+        "calls_imsi": {k: sorted(v) for k, v in calls_by_imsi.items()},
+        "calls_imei": {k: sorted(v) for k, v in calls_by_imei.items()},
+        "sess_phone": {k: sorted(v) for k, v in sess_by_phone.items()},
+        "sess_imsi": {k: sorted(v) for k, v in sess_by_imsi.items()},
+        "sess_imei": {k: sorted(v) for k, v in sess_by_imei.items()},
     }
+    _INDEX_CACHE[key] = out
+    return out
 
 
 def _count(lst: list, ts: float, window: float) -> int:
@@ -128,8 +131,14 @@ def _window_correlations(bundle: dict, idx: dict, w: float) -> dict:
             "correlation_rate": round(pairs / max(1, txns), 3)}
 
 
+_TXN_TEMPORAL_CACHE = {}
+
 def txn_temporal_scores(bundle: dict, window_sec: int = 1800) -> dict[str, dict]:
     """Per-transaction temporal score (0-100) + correlation detail."""
+    key = (id(bundle), window_sec)
+    if key in _TXN_TEMPORAL_CACHE:
+        return _TXN_TEMPORAL_CACHE[key]
+        
     idx = build_temporal_index(bundle)
     out: dict[str, dict] = {}
     w = float(window_sec)
@@ -165,6 +174,7 @@ def txn_temporal_scores(bundle: dict, window_sec: int = 1800) -> dict[str, dict]
             "sessions_in_window": sess,
             "window_sec": int(w),
         }
+    _TXN_TEMPORAL_CACHE[key] = out
     return out
 
 

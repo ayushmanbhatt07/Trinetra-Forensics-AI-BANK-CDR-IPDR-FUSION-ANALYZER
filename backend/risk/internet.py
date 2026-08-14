@@ -49,12 +49,31 @@ def _index(bundle: dict) -> dict:
     for d in (sess_by_phone, imsi_by_phone, imei_by_phone, cell_by_phone):
         for k in d:
             d[k].sort()
+    first_seen_imsi: dict[str, dict[str, float]] = defaultdict(dict)
+    first_seen_imei: dict[str, dict[str, float]] = defaultdict(dict)
+    first_seen_cell: dict[str, dict[str, float]] = defaultdict(dict)
+    for ph, lst in imsi_by_phone.items():
+        for t_val, v in lst:
+            if v not in first_seen_imsi[ph]:
+                first_seen_imsi[ph][v] = t_val
+    for ph, lst in imei_by_phone.items():
+        for t_val, v in lst:
+            if v not in first_seen_imei[ph]:
+                first_seen_imei[ph][v] = t_val
+    for ph, lst in cell_by_phone.items():
+        for t_val, v in lst:
+            if v not in first_seen_cell[ph]:
+                first_seen_cell[ph][v] = t_val
+
     return {
         "sess_by_phone": sess_by_phone,
         "ip_by_phone": ip_by_phone,
         "imsi_by_phone": imsi_by_phone,
         "imei_by_phone": imei_by_phone,
         "cell_by_phone": cell_by_phone,
+        "first_seen_imsi": first_seen_imsi,
+        "first_seen_imei": first_seen_imei,
+        "first_seen_cell": first_seen_cell,
         "ip_subscribers": ip_subscribers,
     }
 
@@ -112,24 +131,30 @@ def txn_internet_scores(bundle: dict, window_sec: int = _WINDOW) -> dict[str, di
                     add(25, f"phone shares IP {ip} with "
                             f"{hit['subscriber_count']} other subscribers")
 
-            def _novel(hist: list, before, after) -> set:
-                i0 = bisect.bisect_left(hist, (ts, before))
-                prior = {v for _, v in hist[:i0]}
-                i1 = bisect.bisect_left(hist, (ts + w, after))
-                near = {v for _, v in hist[i0:i1]}
-                return near - prior
-
-            new_imsi = _novel(idx["imsi_by_phone"].get(phone) or [],
-                              "", "\uffff")
+            imsi_hist = idx["imsi_by_phone"].get(phone) or []
+            i0_m = bisect.bisect_left(imsi_hist, (ts, ""))
+            i1_m = bisect.bisect_left(imsi_hist, (ts + w, "\uffff"))
+            imsi_fs = idx["first_seen_imsi"].get(phone, {})
+            new_imsi = {v for _, v in imsi_hist[i0_m:i1_m] if imsi_fs.get(v, 0.0) >= ts}
             if new_imsi:
                 add(30, f"SIM (IMSI) {sorted(new_imsi)[0]} first seen around txn")
-            new_imei = _novel(idx["imei_by_phone"].get(phone) or [],
-                              "", "\uffff")
+
+            imei_hist = idx["imei_by_phone"].get(phone) or []
+            i0_e = bisect.bisect_left(imei_hist, (ts, ""))
+            i1_e = bisect.bisect_left(imei_hist, (ts + w, "\uffff"))
+            imei_fs = idx["first_seen_imei"].get(phone, {})
+            new_imei = {v for _, v in imei_hist[i0_e:i1_e] if imei_fs.get(v, 0.0) >= ts}
             if new_imei:
                 add(30, f"device (IMEI) {sorted(new_imei)[0]} first seen around txn")
-            new_cell = _novel(idx["cell_by_phone"].get(phone) or [], "", "\uffff")
+
+            cell_hist = idx["cell_by_phone"].get(phone) or []
+            i0_c = bisect.bisect_left(cell_hist, (ts, ""))
+            i1_c = bisect.bisect_left(cell_hist, (ts + w, "\uffff"))
+            cell_fs = idx["first_seen_cell"].get(phone, {})
+            new_cell = {v for _, v in cell_hist[i0_c:i1_c] if cell_fs.get(v, 0.0) >= ts}
             if new_cell:
                 add(15, f"location (cell {sorted(new_cell)[0]}) first seen around txn")
+
             if not sess and (new_imsi or new_imei or new_cell):
                 add(10, "device/SIM/location change with no prior session history")
 
@@ -141,13 +166,21 @@ def txn_internet_scores(bundle: dict, window_sec: int = _WINDOW) -> dict[str, di
     return out
 
 
+_INTERNET_SCORES_CACHE = {}
+
 def internet_scores(bundle: dict, window_sec: int = _WINDOW) -> dict:
+    key = (id(bundle), window_sec)
+    if key in _INTERNET_SCORES_CACHE:
+        return _INTERNET_SCORES_CACHE[key]
+        
     txn = txn_internet_scores(bundle, window_sec)
     shared_ips = shared_ip_risk(_index(bundle))
-    return {
+    out = {
         "txn": txn,
         "shared_ips": shared_ips,
         "stats": {"shared_ips": len(shared_ips),
                   "flagged_txns": sum(1 for v in txn.values()
                                       if v["internet_score"] >= 25)},
     }
+    _INTERNET_SCORES_CACHE[key] = out
+    return out

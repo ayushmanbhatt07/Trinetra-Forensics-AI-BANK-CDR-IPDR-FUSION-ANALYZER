@@ -168,19 +168,59 @@ def _build_global_ctx(bundle: dict) -> dict:
     for phone in ipdr_pair_by_phone:
         ipdr_pair_by_phone[phone].sort(key=lambda x: x[0])
 
+    calls_by_phone_day: dict[tuple[str, str], int] = defaultdict(int)
+    for ph, call_list in calls_by_phone.items():
+        for cts, dur, voice in call_list:
+            if voice or dur >= _CALL_MIN_DUR:
+                d = _ts_day(cts)
+                if d:
+                    calls_by_phone_day[(ph, d)] += 1
+
+    # First-seen indexes for O(1) device/pair/cell novelty checks
+    imei_first_seen: dict[str, dict[str, float]] = defaultdict(dict)
+    for ph, lst in imei_by_phone.items():
+        for ts_val, v in lst:
+            if v not in imei_first_seen[ph]:
+                imei_first_seen[ph][v] = ts_val
+    for ph, lst in ipdr_imei_by_phone.items():
+        for ts_val, v in lst:
+            if v not in imei_first_seen[ph]:
+                imei_first_seen[ph][v] = ts_val
+
+    pair_first_seen: dict[str, dict[tuple, float]] = defaultdict(dict)
+    for ph, lst in pair_by_phone.items():
+        for ts_val, v in lst:
+            if v not in pair_first_seen[ph]:
+                pair_first_seen[ph][v] = ts_val
+    for ph, lst in ipdr_pair_by_phone.items():
+        for ts_val, v in lst:
+            if v not in pair_first_seen[ph]:
+                pair_first_seen[ph][v] = ts_val
+
+    cell_first_seen: dict[str, dict[str, float]] = defaultdict(dict)
+    for ph, lst in cell_by_phone.items():
+        for ts_val, v in lst:
+            if v not in cell_first_seen[ph]:
+                cell_first_seen[ph][v] = ts_val
+
     ctx = {
         "medians": medians, "customer_times": customer_times,
         "prior_txns": prior_txns,
         "prior_beneficiaries": prior_beneficiaries,
-        "calls_by_phone": calls_by_phone, "ipdr_by_phone": ipdr_by_phone,
+        "calls_by_phone": calls_by_phone,
+        "calls_by_phone_day": calls_by_phone_day,
+        "ipdr_by_phone": ipdr_by_phone,
         "imei_by_phone": imei_by_phone, "pair_by_phone": pair_by_phone,
         "ipdr_imei_by_phone": ipdr_imei_by_phone,
         "ipdr_pair_by_phone": ipdr_pair_by_phone,
         "cell_by_phone": cell_by_phone,
+        "imei_first_seen": imei_first_seen,
+        "pair_first_seen": pair_first_seen,
+        "cell_first_seen": cell_first_seen,
         "hour_modes": _customer_hour_modes(bank),
         "day_granular": _day_granular(bank),
         "imei_global": Counter(r["imei"] for r in cdr + ipdr
-                               if r.get("imei")),
+                                if r.get("imei")),
         "cell_global": Counter(
             r.get("bts_location_first") or r.get("cell_id_first") or ""
             for r in cdr if r.get("bts_location_first")
@@ -205,13 +245,6 @@ def score_transactions(bundle: dict) -> list[dict]:
 
 
 # A rule family is only informative if it fires on a minority of the dataset.
-# Some synthetic generators produce a uniformly-random background (odd hours,
-# fresh receivers and calls around transfers are the *norm*), where these
-# rules are mostly noise.  Rather than hard-disabling a family above a noise
-# ceiling (which cancels genuine detections the moment a signal becomes
-# prevalent), the family's points are down-weighted gradually: a family that
-# fires on `p` of the dataset keeps a weight of `max(0.2, (1-p)/(1-ceiling))`,
-# so rare signals score full points while ubiquitous ones degrade gracefully.
 _RULE_NOISE_CEILING = 0.25
 
 
@@ -222,10 +255,11 @@ def _family_weight(prevalence: float) -> float:
 
 
 def _rule_activations(bank: list[dict], ctx: dict) -> dict:
-    n = max(1, len(bank))
+    sample = bank if len(bank) <= 1000 else bank[::max(1, len(bank) // 1000)]
+    n = max(1, len(sample))
     odd = new_ben = hour_dev = 0
     modes = ctx.get("hour_modes", {})
-    for t in bank:
+    for t in sample:
         if 0 <= _local_hour(t) != -1 and (_local_hour(t) >= 22 or _local_hour(t) < 6):
             odd += 1
         recv = t.get("receiver_account") or ""
@@ -240,7 +274,7 @@ def _rule_activations(bank: list[dict], ctx: dict) -> dict:
             hour_dev += 1
     with_phone = 0
     call_near = sess_near = 0
-    for t in bank:
+    for t in sample:
         phone = t.get("sender_phone") or ""
         ts = float(t.get("ts") or 0.0)
         if not phone or not ts:
@@ -253,8 +287,6 @@ def _rule_activations(bank: list[dict], ctx: dict) -> dict:
             lst = ctx["calls_by_phone"].get(ph) or []
             i0 = bisect.bisect_left(lst, (ts - _CALL_WINDOW, -1))
             i1 = bisect.bisect_left(lst, (ts, 0))
-            # prevalence uses voice/long rows only: SMS/missed rows are dense
-            # dataset noise and must not depress the family weight
             if any(d >= _CALL_MIN_DUR for _, d, _v in lst[i0:i1]):
                 got_call = True
                 break
@@ -420,10 +452,10 @@ def _score_transaction(t: dict, ctx: dict) -> dict:
     if w_calls > 0 and not txn_has_time and ctx["day_granular"]:
         day = t.get("date") or ""
         day_calls = 0
-        for ph in (phone, t.get("receiver_phone") or ""):
-            for cts, dur, voice in (ctx["calls_by_phone"].get(ph) or []):
-                if (voice or dur >= _CALL_MIN_DUR) and _ts_day(cts) == day:
-                    day_calls += 1
+        if day:
+            for ph in (phone, t.get("receiver_phone") or ""):
+                if ph:
+                    day_calls += ctx["calls_by_phone_day"].get((ph, day), 0)
         if day_calls >= 2:
             add("REPEATED_CALLS_BEFORE_TRANSACTION", 25,
                 f"{day_calls} calls on the same day as this transfer",
@@ -476,73 +508,58 @@ def _score_transaction(t: dict, ctx: dict) -> dict:
                 f"{n_sess} data sessions within ±30 minutes of this "
                 "transaction", weight=w_net)
 
-        def _novel_near(hist: list, window: float, before, after) -> set:
-            """Values seen in (ts, ts+window] but never before ts."""
-            i_prior = bisect.bisect_left(hist, (ts, before))
-            prior = {v for _, v in hist[:i_prior]}
-            i_near = bisect.bisect_left(hist, (ts + window, after))
-            return {v for _, v in hist[i_prior:i_near]} - prior
+        imei_map = ctx.get("imei_first_seen", {}).get(phone, {})
+        h_imei = ctx["imei_by_phone"].get(phone) or []
+        i0_im = bisect.bisect_left(h_imei, (ts, ""))
+        i1_im = bisect.bisect_left(h_imei, (ts + _CALL_WINDOW, "\uffff"))
+        novel_imei = {v for _, v in h_imei[i0_im:i1_im] if imei_map.get(v, 0.0) >= ts}
 
-        def _rare(hist: list, values: set, max_seen: int = 2) -> set:
-            """Filter to values occurring at most `max_seen` times before the
-            transaction.  Post-transaction occurrences (the anomaly itself,
-            follow-up sessions) must not disqualify a genuinely novel value."""
-            counts = Counter(v for _, v in hist if _ < ts)
-            return {v for v in values if counts.get(v, 0) <= max_seen}
+        h_ipdr_im = ctx["ipdr_imei_by_phone"].get(phone) or []
+        i0_ipim = bisect.bisect_left(h_ipdr_im, (ts, ""))
+        i1_ipim = bisect.bisect_left(h_ipdr_im, (ts + _IPDR_WINDOW, "\uffff"))
+        novel_imei |= {v for _, v in h_ipdr_im[i0_ipim:i1_ipim] if imei_map.get(v, 0.0) >= ts}
 
-        novel_imei = _novel_near(ctx["imei_by_phone"].get(phone) or [],
-                                 _CALL_WINDOW, "", "\uffff")
-        novel_imei |= _novel_near(ctx["ipdr_imei_by_phone"].get(phone) or [],
-                                  _IPDR_WINDOW, "", "\uffff")
-        novel_imei = _rare((ctx["imei_by_phone"].get(phone) or [])
-                           + (ctx["ipdr_imei_by_phone"].get(phone) or []),
-                           novel_imei)
         if novel_imei:
             add("NEW_DEVICE_AROUND_TRANSACTION", 30,
                 f"IMEI {sorted(novel_imei)[0]} never used by this "
                 "phone before", weight=w_net)
         else:
-            h = ctx["imei_by_phone"].get(phone) or []
-            i0 = bisect.bisect_left(h, (ts, ""))
-            near_imeis = {v for _, v in
-                          h[i0:bisect.bisect_left(h, (ts + _CALL_WINDOW,
-                                                      "\uffff"))]}
-            rare = {v for v in near_imeis
-                    if ctx["imei_global"].get(v, 0) <= 2}
+            near_imeis = {v for _, v in h_imei[i0_im:i1_im]}
+            rare = {v for v in near_imeis if ctx["imei_global"].get(v, 0) <= 2}
             if rare:
                 add("NEW_DEVICE_AROUND_TRANSACTION", 15,
                     f"IMEI {sorted(rare)[0]} appears only "
                     f"{ctx['imei_global'].get(sorted(rare)[0])}x "
                     "dataset-wide (burner device)", weight=w_net)
 
-        novel_pair = _novel_near(ctx["pair_by_phone"].get(phone) or [],
-                                 _CALL_WINDOW, ("", ""), ("\uffff", "\uffff"))
-        ipdr_pairs = ctx["ipdr_pair_by_phone"].get(phone) or []
-        i_p = bisect.bisect_left(ipdr_pairs, (ts, ("", "")))
-        ipdr_prior = {p for _, p in ipdr_pairs[:i_p]}
-        cdr_near = {p for _, p in ctx["pair_by_phone"].get(phone) or []
-                    if abs(_ - ts) <= 48 * 3600}
-        if cdr_near and cdr_near - ipdr_prior:
-            novel_pair |= cdr_near - ipdr_prior
-        novel_pair = _rare((ctx["pair_by_phone"].get(phone) or [])
-                           + ipdr_pairs, novel_pair)
+        pair_map = ctx.get("pair_first_seen", {}).get(phone, {})
+        h_pair = ctx["pair_by_phone"].get(phone) or []
+        i0_p = bisect.bisect_left(h_pair, (ts, ("", "")))
+        i1_p = bisect.bisect_left(h_pair, (ts + _CALL_WINDOW, ("\uffff", "\uffff")))
+        novel_pair = {v for _, v in h_pair[i0_p:i1_p] if pair_map.get(v, 0.0) >= ts}
+
+        h_ipdr_p = ctx["ipdr_pair_by_phone"].get(phone) or []
+        i0_ipp = bisect.bisect_left(h_ipdr_p, (ts, ("", "")))
+        i1_ipp = bisect.bisect_left(h_ipdr_p, (ts + _IPDR_WINDOW, ("\uffff", "\uffff")))
+        novel_pair |= {v for _, v in h_ipdr_p[i0_ipp:i1_ipp] if pair_map.get(v, 0.0) >= ts}
+
         if novel_pair:
             add("IMSI_IMEI_PAIR_NOVELTY", 35,
                 f"(IMSI, IMEI) pair {sorted(novel_pair)[0]} never seen for "
                 "this phone before", weight=w_net)
 
+        cell_map = ctx.get("cell_first_seen", {}).get(phone, {})
         cell_hist = ctx["cell_by_phone"].get(phone) or []
-        i_prior = bisect.bisect_left(cell_hist, (ts, ""))
-        prior_cells = {v for _, v in cell_hist[:i_prior]}
-        i_near = bisect.bisect_left(cell_hist, (ts, "\uffff"))
-        near_cells = {v for _, v in cell_hist[i_prior:i_near]}
-        if prior_cells and near_cells and not near_cells <= prior_cells:
+        i_prior_c = bisect.bisect_left(cell_hist, (ts, ""))
+        i_near_c = bisect.bisect_left(cell_hist, (ts + _CALL_WINDOW, "\uffff"))
+        novel_cells = {v for _, v in cell_hist[i_prior_c:i_near_c] if cell_map.get(v, 0.0) >= ts}
+        near_cells = {v for _, v in cell_hist[i_prior_c:i_near_c]}
+        if novel_cells and i_prior_c > 0:
             add("UNUSUAL_LOCATION_CONTEXT", 30,
-                f"Phone was at cell {sorted(near_cells - prior_cells)[0]} "
+                f"Phone was at cell {sorted(novel_cells)[0]} "
                 "near txn time — never seen there before", weight=w_net)
         elif near_cells:
-            rare = {v for v in near_cells
-                    if ctx["cell_global"].get(v, 0) <= 2}
+            rare = {v for v in near_cells if ctx["cell_global"].get(v, 0) <= 2}
             if rare:
                 add("UNUSUAL_LOCATION_CONTEXT", 15,
                     f"Phone at cell {sorted(rare)[0]} near txn time — "

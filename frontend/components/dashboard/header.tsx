@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { cn } from "@/lib/utils";
@@ -26,7 +26,7 @@ const sectionTitles: Record<Section, string> = {
   search: "Entity Search",
 };
 
-export function Header({ activeSection }: HeaderProps) {
+export const Header = React.memo(function Header({ activeSection }: HeaderProps) {
   const { user, logout } = useAuth();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const initials = (user?.username ?? "?")
@@ -104,4 +104,4 @@ export function Header({ activeSection }: HeaderProps) {
       <AccountDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </header>
   );
-}
+});

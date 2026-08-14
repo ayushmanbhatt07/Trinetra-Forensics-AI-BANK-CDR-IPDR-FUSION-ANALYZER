@@ -66,7 +66,7 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
     from sklearn.ensemble import IsolationForest
     from sklearn.neighbors import LocalOutlierFactor
 
-    forest = IsolationForest(n_estimators=200, contamination=0.1,
+    forest = IsolationForest(n_estimators=50, contamination=0.1,
                              random_state=42, n_jobs=1)
     pred = forest.fit_predict(X)
     raw = -forest.score_samples(X)

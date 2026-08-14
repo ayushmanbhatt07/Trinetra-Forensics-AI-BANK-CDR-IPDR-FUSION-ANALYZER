@@ -43,13 +43,13 @@ const AuthContext = createContext<AuthState | null>(null);
 
 function readToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(TOKEN_KEY);
+  return window.sessionStorage.getItem(TOKEN_KEY);
 }
 
 function readUser(): AuthUser | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(USER_KEY);
+    const raw = window.sessionStorage.getItem(USER_KEY);
     return raw ? (JSON.parse(raw) as AuthUser) : null;
   } catch {
     return null;
@@ -65,14 +65,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
 
   useEffect(() => {
-    const t = window.localStorage.getItem(TOKEN_KEY);
+    const t = window.sessionStorage.getItem(TOKEN_KEY);
     if (!t) return;
     api
       .me()
       .then((me) => setUser(me.user))
       .catch(() => {
-        window.localStorage.removeItem(TOKEN_KEY);
-        window.localStorage.removeItem(USER_KEY);
+        window.sessionStorage.removeItem(TOKEN_KEY);
+        window.sessionStorage.removeItem(USER_KEY);
         setToken(null);
         setUser(null);
       })
@@ -81,8 +81,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handle401 = () => {
-      window.localStorage.removeItem(TOKEN_KEY);
-      window.localStorage.removeItem(USER_KEY);
+      window.sessionStorage.removeItem(TOKEN_KEY);
+      window.sessionStorage.removeItem(USER_KEY);
       setToken(null);
       setUser(null);
       toast.error("Session expired or token invalid. Please sign in again.");
@@ -96,8 +96,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(
     async (username: string, password: string) => {
       const res = await api.login(username, password);
-      window.localStorage.setItem(TOKEN_KEY, res.access_token);
-      window.localStorage.setItem(USER_KEY, JSON.stringify(res.user));
+      window.sessionStorage.setItem(TOKEN_KEY, res.access_token);
+      window.sessionStorage.setItem(USER_KEY, JSON.stringify(res.user));
       setToken(res.access_token);
       setUser(res.user);
       return res.user;
@@ -108,8 +108,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const register = useCallback(
     async (username: string, password: string) => {
       const res = await api.register(username, password);
-      window.localStorage.setItem(TOKEN_KEY, res.access_token);
-      window.localStorage.setItem(USER_KEY, JSON.stringify(res.user));
+      window.sessionStorage.setItem(TOKEN_KEY, res.access_token);
+      window.sessionStorage.setItem(USER_KEY, JSON.stringify(res.user));
       setToken(res.access_token);
       setUser(res.user);
       return res.user;
@@ -123,8 +123,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // the next login starts fresh. Fire-and-forget — local logout proceeds
     // even if the backend is unreachable.
     api.logout().catch(() => undefined);
-    window.localStorage.removeItem(TOKEN_KEY);
-    window.localStorage.removeItem(USER_KEY);
+    window.sessionStorage.removeItem(TOKEN_KEY);
+    window.sessionStorage.removeItem(USER_KEY);
     setToken(null);
     setUser(null);
     router.replace("/login");

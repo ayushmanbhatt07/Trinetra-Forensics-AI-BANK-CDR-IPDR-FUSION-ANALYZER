@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { FlipKpiCard } from "@/components/ui/flip-card";
 import { Database, ShieldAlert, Users, Target, FileText, PhoneCall, Banknote, Activity, Network } from "lucide-react";
 import { api, isNoDataLoaded, isPipelineNotReady, isNetworkOrWarmupError, type Summary, type CopilotStats } from "@/lib/api";
 import { toast } from "sonner";
+import { usePipeline } from "@/lib/pipeline-context";
 
-export function OverviewSection() {
+export const OverviewSection = React.memo(function OverviewSection() {
+  const { isFusedReady, isAnomaliesReady } = usePipeline();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [copilot, setCopilot] = useState<CopilotStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,7 +25,9 @@ export function OverviewSection() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, []);
+  useEffect(() => {
+    load();
+  }, [isFusedReady, isAnomaliesReady]);
 
 
   useEffect(() => {
@@ -247,4 +251,4 @@ export function OverviewSection() {
       )}
     </div>
   );
-}
+});

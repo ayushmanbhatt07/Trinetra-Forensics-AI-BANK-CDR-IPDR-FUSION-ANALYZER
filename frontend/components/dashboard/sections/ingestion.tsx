@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { FileUp, Database, FileText, PhoneCall, CheckCircle, Loader2, FolderOpen } from "lucide-react";
@@ -8,12 +8,14 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { api } from "@/lib/api";
+import { usePipeline } from "@/lib/pipeline-context";
 
-export function IngestionSection() {
+export const IngestionSection = React.memo(function IngestionSection() {
   const [files, setFiles] = useState<File[]>([]);
   const [folder, setFolder] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [isFolderIngesting, setIsFolderIngesting] = useState(false);
+  const { refetchPipeline } = usePipeline();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -39,6 +41,7 @@ export function IngestionSection() {
         toast.error(`Skipped ${data.skipped.length} files · errors: ${data.errors.join("; ").slice(0, 200)}`);
       }
       setFiles([]);
+      refetchPipeline();
       window.dispatchEvent(new CustomEvent("nav:section", { detail: "fused" }));
     } catch (error) {
       toast.error(`Error: ${error instanceof Error ? error.message : "Upload failed"}`);
@@ -57,6 +60,7 @@ export function IngestionSection() {
       const data = await api.ingestFolder(folder.trim());
       toast.success(`Folder ingested: ${data.files_ok} files ok`);
       if (data.errors.length) toast.error(`Errors: ${data.errors.slice(0, 3).join("; ")}`);
+      refetchPipeline();
       window.dispatchEvent(new CustomEvent("nav:section", { detail: "fused" }));
     } catch (error) {
       toast.error(`Error: ${error instanceof Error ? error.message : "Folder ingest failed"}`);
@@ -156,4 +160,4 @@ export function IngestionSection() {
       </div>
     </div>
   );
-}
+});

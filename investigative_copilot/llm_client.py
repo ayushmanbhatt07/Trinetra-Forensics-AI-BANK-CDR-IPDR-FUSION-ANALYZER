@@ -23,7 +23,7 @@ from backend import config
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama-3.1-8b-instant"
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -78,7 +78,7 @@ class LlmClient:
     """Small stateless provider chain around ``requests``."""
 
     def __init__(self, groq_model: str = GROQ_MODEL,
-                 groq_timeout: float = 45.0) -> None:
+                 groq_timeout: float = 20.0) -> None:
         self.groq_model = groq_model
         self.groq_timeout = groq_timeout
         self._last_latency = 0
@@ -135,6 +135,10 @@ class LlmClient:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        # Cap tokens for interactive forensic queries — 1024 is ample for structured JSON answers
+        if "max_tokens" not in payload:
+            payload["max_tokens"] = 1024
+
             
         last_err = "no keys configured"
         for i, key in enumerate(keys):

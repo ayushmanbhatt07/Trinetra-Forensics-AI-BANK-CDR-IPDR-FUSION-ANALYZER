@@ -42,12 +42,13 @@ _DEFAULTS = {
 _NAME_RE = re.compile(r"^APP_HYBRID_([A-Z_]+)$")
 
 
+_CACHED_WEIGHTS: dict[str, float] | None = None
+
 def _env_weights() -> dict[str, float]:
     out = {}
     for key, value in os.environ.items():
-        m = _NAME_RE.match(key)
-        if m:
-            name = m.group(1).lower()
+        if key.startswith("APP_HYBRID_"):
+            name = key[11:].lower()
             if name in _DEFAULTS:
                 try:
                     out[name] = max(0.0, float(value))
@@ -57,23 +58,32 @@ def _env_weights() -> dict[str, float]:
 
 
 def hybrid_weights() -> dict[str, float]:
-    weights = dict(_DEFAULTS)
-    weights.update(_env_weights())
-    return weights
+    global _CACHED_WEIGHTS
+    if _CACHED_WEIGHTS is None:
+        weights = dict(_DEFAULTS)
+        weights.update(_env_weights())
+        _CACHED_WEIGHTS = weights
+    return _CACHED_WEIGHTS
+
+
+def clear_weights_cache() -> None:
+    global _CACHED_WEIGHTS
+    _CACHED_WEIGHTS = None
 
 
 def weight(name: str) -> float:
     return hybrid_weights().get(name, 0.0)
 
 
-def renormalise(values: dict[str, float]) -> float:
+def renormalise(values: dict[str, float], weights: dict[str, float] | None = None) -> float:
     """Weighted sum of present scores, renormalised by the weight total.
 
     Missing engines simply drop out of the sum (their weight is excluded),
     so a bundle without IPDR data never loses score mass.
     """
-    weights = hybrid_weights()
-    num = sum(weights[k] * max(0.0, min(100.0, v))
+    if weights is None:
+        weights = hybrid_weights()
+    num = sum(weights[k] * (v if 0.0 <= v <= 100.0 else max(0.0, min(100.0, v)))
               for k, v in values.items())
     den = sum(weights[k] for k in values)
     if den <= 0:

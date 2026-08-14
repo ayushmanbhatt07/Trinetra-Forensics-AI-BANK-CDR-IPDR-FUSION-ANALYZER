@@ -3,11 +3,22 @@
 /**
  * Fused Transactions — standalone section showing the fused bank+CDR+IPDR
  * records table with search, account filter, risk annotation and pagination.
+ *
+ * SYNCHRONIZATION FIX:
+ * The component must NOT bail out ("No fused records") while the pipeline
+ * context is still loading its first status response. Doing so causes a
+ * permanent empty state that only resolves after a browser refresh.
+ *
+ * Correct lifecycle:
+ *   mount → context loading=true  → show spinner
+ *   context loading=false, isFusedReady=false  → show "pipeline running" state
+ *   context loading=false, isFusedReady=true   → fetch data
+ *   isFusedReady transitions false→true (pipeline completes) → refetch
  */
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Database, Search, Download, ShieldAlert,
-  FileText, X, Activity, AlertTriangle, Check, Copy, PhoneCall
+  FileText, X, Activity, AlertTriangle, Check, Copy, PhoneCall, Loader2, Clock
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,7 +27,8 @@ import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
-import { api, type FusedRow } from "@/lib/api";
+import { api, type FusedRow, isPipelineNotReady } from "@/lib/api";
+import { usePipeline } from "@/lib/pipeline-context";
 
 const PAGE_SIZE = 50;
 
@@ -28,12 +40,16 @@ const riskStyle = (score: number) => {
   return { color: "#34d399", bg: "bg-emerald-500/10 border-emerald-500/40" };
 };
 
-export function FusedSection() {
+export const FusedSection = React.memo(function FusedSection() {
   const [rows, setRows] = useState<FusedRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [q, setQ] = useState("");
-  const [account, setAccount] = useState("");
+  const [dateStart, setDateStart] = useState("");
+  const [dateEnd, setDateEnd] = useState("");
+  const [minAmount, setMinAmount] = useState<number | "">("");
+  const [maxAmount, setMaxAmount] = useState<number | "">("");
+  const [riskBand, setRiskBand] = useState("");
   const [riskAnnotate, setRiskAnnotate] = useState(true);
   const [fusedLoading, setFusedLoading] = useState(true);
   const [fusedKey, setFusedKey] = useState(0);
@@ -43,48 +59,104 @@ export function FusedSection() {
   const [panelPayload, setPanelPayload] = useState<any>(null);
   const [panelBusy, setPanelBusy] = useState(false);
 
+  const { isFusedReady, isAnomaliesReady, loading: pipelineLoading, pipeline } = usePipeline();
+
+  // In-memory client cache to make tab switches and pagination instant (0ms)
+  const fusedCacheRef = useRef<Map<string, { rows: FusedRow[]; total: number }>>(new Map());
+
+  // Track previous ready states
+  const prevFusedReady = useRef<boolean>(false);
+  const prevAnomaliesReady = useRef<boolean>(false);
+
+  // Clear cache on dataset change
+  useEffect(() => {
+    fusedCacheRef.current.clear();
+  }, [pipeline?.dataset_id]);
+
   const loadFused = useCallback(() => {
+    if (pipelineLoading) {
+      setFusedLoading(true);
+      return;
+    }
+
+    if (!isFusedReady && !pipeline?.dataset_id) {
+      setFusedLoading(false);
+      return;
+    }
+
+    const cacheKey = `${pipeline?.dataset_id || "default"}:${offset}:${q}:${riskAnnotate}:${dateStart}:${dateEnd}:${minAmount}:${maxAmount}:${riskBand}:${isAnomaliesReady}`;
+    const cached = fusedCacheRef.current.get(cacheKey);
+    if (cached) {
+      setRows(cached.rows);
+      setTotal(cached.total);
+      setFusedLoading(false);
+      return;
+    }
+
+    // Fetch fused records
     setFusedLoading(true);
     api
-      .fused(offset, PAGE_SIZE, q, account, riskAnnotate)
+      .fused(offset, PAGE_SIZE, q, "", "all", riskAnnotate, dateStart, dateEnd, Number(minAmount) || 0, Number(maxAmount) || 0, riskBand)
       .then((res) => {
-        setRows(res.rows || []);
-        setTotal(res.total ?? 0);
+        const data = { rows: res.rows || [], total: res.total ?? 0 };
+        fusedCacheRef.current.set(cacheKey, data);
+        setRows(data.rows);
+        setTotal(data.total);
       })
       .catch((error) => {
         const err = error as { status?: number };
-        if (err.status !== 409) {
+        if (err.status !== 409 && !isPipelineNotReady(error)) {
           toast.error("Failed to load fused records. Is the backend running?");
         }
         setRows([]);
         setTotal(0);
       })
       .finally(() => setFusedLoading(false));
-  }, [offset, q, account, riskAnnotate]);
+  }, [offset, q, riskAnnotate, isFusedReady, isAnomaliesReady, pipelineLoading, dateStart, dateEnd, minAmount, maxAmount, riskBand, pipeline?.dataset_id]);
 
+  // Primary effect: re-run loadFused whenever its dependencies change.
   useEffect(() => {
-    const t = setTimeout(loadFused, 0);
+    const t = setTimeout(loadFused, q ? 200 : 0);
     return () => clearTimeout(t);
   }, [loadFused, fusedKey]);
 
+  // Secondary effect: detect isFusedReady or isAnomaliesReady transitions and trigger an immediate refetch.
+  useEffect(() => {
+    if ((!prevFusedReady.current && isFusedReady) || (!prevAnomaliesReady.current && isAnomaliesReady)) {
+      fusedCacheRef.current.clear();
+      setFusedKey((k) => k + 1);
+    }
+    prevFusedReady.current = isFusedReady;
+    prevAnomaliesReady.current = isAnomaliesReady;
+  }, [isFusedReady, isAnomaliesReady]);
+
   const downloadFusedCsv = async () => {
+    const t = toast.loading("Preparing CSV...");
     try {
-      await api.fusedCsv(q, account);
-      toast.success("Fused records CSV export started.");
+      await api.fusedCsv(q, "", "all", dateStart, dateEnd, Number(minAmount) || 0, Number(maxAmount) || 0, riskBand);
+      toast.success("CSV export started.", { id: t });
     } catch (e) {
-      toast.error((e as { message?: string })?.message ?? "Failed to export CSV.");
+      toast.error((e as { message?: string })?.message ?? "Failed to export CSV.", { id: t });
     }
   };
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.floor(offset / PAGE_SIZE) + 1;
 
-  
+  const entityDossierCacheRef = useRef<Map<string, any>>(new Map());
+
   const openDossier = async (kind: string, value: string) => {
     if (!value) return;
+    const cacheKey = `${kind}:${value}`;
+    const cached = entityDossierCacheRef.current.get(cacheKey);
+    if (cached) {
+      setPanelPayload({ type: "entity", info: cached });
+      return;
+    }
     setPanelBusy(true);
     try {
       const info = await api.dossier(kind, value);
+      entityDossierCacheRef.current.set(cacheKey, info);
       setPanelPayload({ type: "entity", info });
     } catch (e: any) {
       if (e.status !== 409) toast.error(`No dossier found for ${kind} ${value}`);
@@ -98,6 +170,48 @@ export function FusedSection() {
     navigator.clipboard.writeText(JSON.stringify(selectedRow, null, 2));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Determine what empty-state message to show
+  const renderEmptyState = () => {
+    if (pipelineLoading || fusedLoading) {
+      return (
+        <div className="p-8 text-center text-muted-foreground">
+          <Loader2 className="mx-auto mb-3 size-7 animate-spin text-cyan-500" />
+          <p className="text-sm animate-pulse">Loading fused records...</p>
+        </div>
+      );
+    }
+    if (!isFusedReady) {
+      const stage = pipeline?.status ?? "IDLE";
+      const isProcessing = ["PARSING", "FUSING", "SCORING", "GRAPHS"].includes(stage);
+      return (
+        <div className="p-8 text-center text-muted-foreground">
+          {isProcessing ? (
+            <>
+              <Clock className="mx-auto mb-3 size-7 text-amber-500 animate-pulse" />
+              <p className="text-sm font-semibold text-amber-400">
+                Fusion pipeline is running — {stage}
+              </p>
+              <p className="mt-1 text-xs">
+                The fused records will appear automatically when the pipeline is ready.
+              </p>
+            </>
+          ) : (
+            <>
+              <Database className="mx-auto mb-3 size-7 opacity-30" />
+              <p className="text-sm">No fused records. Ingest bank + CDR + IPDR datasets first.</p>
+            </>
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="p-8 text-center text-muted-foreground">
+        <Database className="mx-auto mb-3 size-7 opacity-30" />
+        <p className="text-sm">No fused records match the current filters.</p>
+      </div>
+    );
   };
 
   return (
@@ -133,32 +247,89 @@ export function FusedSection() {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 border-b border-border p-3">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border p-3 bg-secondary/10">
           <div className="relative min-w-[220px] flex-1">
             <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
             <Input
-              className="pl-8"
-              placeholder="Search transaction id, account, customer, phone..."
+              type="search"
+              name="fused_search_q"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              className="pl-8 h-9 text-sm"
+              placeholder="Search Name, Account, Txn ID, Phone..."
               value={q}
               onChange={(e) => { setQ(e.target.value); setOffset(0); }}
             />
           </div>
-          <Input
-            className="w-44"
-            placeholder="Account filter"
-            value={account}
-            onChange={(e) => { setAccount(e.target.value); setOffset(0); }}
-          />
-          <Button size="sm" variant="secondary" onClick={() => { setOffset(0); setFusedKey((k) => k + 1); }}>
-            Apply
+          <div className="flex items-center gap-1">
+            <Input
+              type="date"
+              className="w-[130px] h-9 text-sm"
+              value={dateStart}
+              onChange={(e) => { setDateStart(e.target.value); setOffset(0); }}
+              title="Start Date"
+            />
+            <span className="text-muted-foreground text-xs px-1">to</span>
+            <Input
+              type="date"
+              className="w-[130px] h-9 text-sm"
+              value={dateEnd}
+              onChange={(e) => { setDateEnd(e.target.value); setOffset(0); }}
+              title="End Date"
+            />
+          </div>
+          <div className="flex items-center gap-1">
+            <Input
+              type="number"
+              name="fused_min_amt"
+              autoComplete="off"
+              className="w-[90px] h-9 text-sm"
+              placeholder="Min Amt"
+              value={minAmount}
+              onChange={(e) => { setMinAmount(e.target.value ? Number(e.target.value) : ""); setOffset(0); }}
+            />
+            <span className="text-muted-foreground text-xs px-1">-</span>
+            <Input
+              type="number"
+              name="fused_max_amt"
+              autoComplete="off"
+              className="w-[90px] h-9 text-sm"
+              placeholder="Max Amt"
+              value={maxAmount}
+              onChange={(e) => { setMaxAmount(e.target.value ? Number(e.target.value) : ""); setOffset(0); }}
+            />
+          </div>
+          <select 
+            className="h-9 w-[120px] rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            value={riskBand}
+            onChange={(e) => { setRiskBand(e.target.value); setOffset(0); }}
+          >
+            <option value="">All Risks</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="safe">Safe</option>
+          </select>
+          <Button size="sm" variant="secondary" onClick={() => { setOffset(0); setFusedKey((k) => k + 1); }} className="h-9">
+            Apply Filter
           </Button>
         </div>
 
-        <div className="flex-1 overflow-auto">
-          {fusedLoading ? (
-            <div className="p-8 text-center text-muted-foreground animate-pulse">Loading fused records...</div>
+        <div className="flex-1 overflow-auto relative">
+          {fusedLoading && rows.length > 0 && (
+            <div className="absolute top-0 left-0 right-0 z-20 h-1 bg-cyan-500/20 overflow-hidden">
+              <div className="h-full bg-cyan-500 animate-pulse w-full" />
+            </div>
+          )}
+          {fusedLoading && rows.length === 0 ? (
+            <div className="p-8 text-center text-muted-foreground">
+              <Loader2 className="mx-auto mb-3 size-7 animate-spin text-cyan-500" />
+              <p className="text-sm animate-pulse">Loading fused records...</p>
+            </div>
           ) : rows.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground">No fused records. Ingest bank + CDR + IPDR datasets first.</div>
+            renderEmptyState()
           ) : (
             <table className="w-full text-sm">
               <thead className="sticky top-0 z-10 bg-muted/60 text-muted-foreground">
@@ -179,8 +350,8 @@ export function FusedSection() {
               </thead>
               <tbody>
                 {rows.map((row, idx) => (
-                  <tr 
-                    key={row.transaction_id + idx} 
+                  <tr
+                    key={row.transaction_id + idx}
                     onClick={() => setSelectedRow(row)}
                     className="cursor-pointer border-b border-border/50 transition-colors hover:bg-muted/30"
                   >
@@ -380,4 +551,4 @@ export function FusedSection() {
       )}
     </div>
   );
-}
+});

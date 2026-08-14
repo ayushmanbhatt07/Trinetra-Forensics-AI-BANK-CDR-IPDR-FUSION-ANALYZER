@@ -1,75 +1,131 @@
-"""Event Intelligence Dossier Generator.
-
-Aggregates raw event records, risk metadata, and cross-domain temporal correlations
-specifically for single forensic events (BANK, CDR, IPDR, COMPLAINTS) clicked
-from the unified timeline.
-"""
-
+import bisect
 from typing import Any, Dict
 from datetime import datetime
 from backend.risk import hybrid
 
-def _parse_ts(ts_str: str) -> datetime | None:
-    if not ts_str:
+_TS_INDEX_CACHE: dict[int, dict] = {}
+
+def _parse_ts(ts_val: Any) -> datetime | None:
+    if not ts_val:
         return None
+    if isinstance(ts_val, (int, float)):
+        try:
+            return datetime.fromtimestamp(ts_val)
+        except Exception:
+            return None
     try:
+        ts_str = str(ts_val)
         if ts_str.endswith("Z"):
             ts_str = ts_str[:-1]
         return datetime.fromisoformat(ts_str)
     except Exception:
         return None
 
-def find_correlations(bundle: dict, target_ts: datetime, window_sec: int = 1800) -> list[Dict[str, Any]]:
-    """Find other events happening within window_sec of the target timestamp."""
-    correlations = []
+def _get_ts_indexes(bundle: dict) -> dict:
+    bundle_id = id(bundle)
+    if bundle_id in _TS_INDEX_CACHE:
+        return _TS_INDEX_CACHE[bundle_id]
     
-    # Check bank
+    bank_list = []
     for r in bundle.get("bank", []):
-        ts = r.get("ts")
-        if not ts: continue
-        dt = _parse_ts(ts)
-        if dt:
-            diff = abs((dt - target_ts).total_seconds())
-            if 0 < diff <= window_sec:
-                correlations.append({
-                    "type": "BANK",
-                    "time_diff_sec": int(diff),
-                    "description": f"Txn: {r.get('amount', 'N/A')} {r.get('txn_type', '')}",
-                    "id": r.get("txn_id"),
-                    "ts": ts
-                })
-                
-    # Check cdr
+        ts_val = r.get("ts")
+        if ts_val:
+            try:
+                t_f = float(ts_val) if isinstance(ts_val, (int, float)) else _parse_ts(ts_val).timestamp()
+                bank_list.append((t_f, r))
+            except Exception:
+                pass
+    bank_list.sort(key=lambda x: x[0])
+    
+    cdr_list = []
     for r in bundle.get("cdr", []):
-        ts = r.get("ts")
-        if not ts: continue
-        dt = _parse_ts(ts)
-        if dt:
-            diff = abs((dt - target_ts).total_seconds())
-            if 0 < diff <= window_sec:
-                correlations.append({
-                    "type": "CDR",
-                    "time_diff_sec": int(diff),
-                    "description": f"Call {r.get('call_type', '')} with {r.get('b_number', '')}",
-                    "id": r.get("cdr_id"),
-                    "ts": ts
-                })
-                
-    # Check ipdr
+        ts_val = r.get("ts")
+        if ts_val:
+            try:
+                t_f = float(ts_val) if isinstance(ts_val, (int, float)) else _parse_ts(ts_val).timestamp()
+                cdr_list.append((t_f, r))
+            except Exception:
+                pass
+    cdr_list.sort(key=lambda x: x[0])
+    
+    ipdr_list = []
     for r in bundle.get("ipdr", []):
-        ts = r.get("start_ts")
-        if not ts: continue
-        dt = _parse_ts(ts)
-        if dt:
-            diff = abs((dt - target_ts).total_seconds())
-            if 0 < diff <= window_sec:
-                correlations.append({
-                    "type": "IPDR",
-                    "time_diff_sec": int(diff),
-                    "description": f"Session to {r.get('dest_ip', '')}",
-                    "id": r.get("ipdr_id"),
-                    "ts": ts
-                })
+        ts_val = r.get("start_ts") or r.get("ts")
+        if ts_val:
+            try:
+                t_f = float(ts_val) if isinstance(ts_val, (int, float)) else _parse_ts(ts_val).timestamp()
+                ipdr_list.append((t_f, r))
+            except Exception:
+                pass
+    ipdr_list.sort(key=lambda x: x[0])
+    
+    idx = {
+        "bank_ts": [x[0] for x in bank_list],
+        "bank_r": [x[1] for x in bank_list],
+        "cdr_ts": [x[0] for x in cdr_list],
+        "cdr_r": [x[1] for x in cdr_list],
+        "ipdr_ts": [x[0] for x in ipdr_list],
+        "ipdr_r": [x[1] for x in ipdr_list],
+    }
+    _TS_INDEX_CACHE[bundle_id] = idx
+    return idx
+
+def find_correlations(bundle: dict, target_ts: datetime, window_sec: int = 1800) -> list[Dict[str, Any]]:
+    """Find other events happening within window_sec of the target timestamp using fast bisect."""
+    correlations = []
+    target_ts_float = target_ts.timestamp()
+    indexes = _get_ts_indexes(bundle)
+    
+    t_min = target_ts_float - window_sec
+    t_max = target_ts_float + window_sec
+    
+    # Fast bisect on bank
+    bts, br = indexes["bank_ts"], indexes["bank_r"]
+    i0 = bisect.bisect_left(bts, t_min)
+    i1 = bisect.bisect_right(bts, t_max)
+    for idx in range(i0, min(i1, i0 + 20)):
+        diff = abs(bts[idx] - target_ts_float)
+        if diff > 0:
+            r = br[idx]
+            correlations.append({
+                "type": "BANK",
+                "time_diff_sec": int(diff),
+                "description": f"Txn: {r.get('amount', 'N/A')} {r.get('txn_type', '')}",
+                "id": r.get("txn_id"),
+                "ts": r.get("ts")
+            })
+            
+    # Fast bisect on cdr
+    cts, cr = indexes["cdr_ts"], indexes["cdr_r"]
+    i0 = bisect.bisect_left(cts, t_min)
+    i1 = bisect.bisect_right(cts, t_max)
+    for idx in range(i0, min(i1, i0 + 20)):
+        diff = abs(cts[idx] - target_ts_float)
+        if diff > 0:
+            r = cr[idx]
+            correlations.append({
+                "type": "CDR",
+                "time_diff_sec": int(diff),
+                "description": f"Call {r.get('call_type', '')} with {r.get('b_number', '')}",
+                "id": r.get("cdr_id"),
+                "ts": r.get("ts")
+            })
+            
+    # Fast bisect on ipdr
+    its, ir = indexes["ipdr_ts"], indexes["ipdr_r"]
+    i0 = bisect.bisect_left(its, t_min)
+    i1 = bisect.bisect_right(its, t_max)
+    for idx in range(i0, min(i1, i0 + 20)):
+        diff = abs(its[idx] - target_ts_float)
+        if diff > 0:
+            r = ir[idx]
+            correlations.append({
+                "type": "IPDR",
+                "time_diff_sec": int(diff),
+                "description": f"Session to {r.get('dest_ip', '')}",
+                "id": r.get("ipdr_id"),
+                "ts": r.get("start_ts") or r.get("ts")
+            })
                 
     # Sort by closest time
     correlations.sort(key=lambda x: x["time_diff_sec"])

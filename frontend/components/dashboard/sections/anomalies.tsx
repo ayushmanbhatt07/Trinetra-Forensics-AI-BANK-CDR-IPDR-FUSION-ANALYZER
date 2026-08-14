@@ -4,11 +4,16 @@
  * Anomaly Detection feed — standalone section (anomalies ONLY).
  * Full-width alert table, row click = blurred background + centralized
  * explainability card with STR generation.
+ *
+ * SYNCHRONIZATION FIX:
+ * Same pattern as fused.tsx — do NOT bail out while pipeline context is loading.
+ * Detect isAnomaliesReady false→true transition and auto-refetch.
+ * Distinguish loading / processing / empty / no-data states clearly.
  */
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   ShieldAlert, FileText, X, Activity, Database,
-  Download, AlertTriangle, Check, Copy, PhoneCall,
+  Download, AlertTriangle, Check, Copy, PhoneCall, Loader2, Clock,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,7 +21,8 @@ import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
-import { api, type Alert } from "@/lib/api";
+import { api, type Alert, isPipelineNotReady } from "@/lib/api";
+import { usePipeline } from "@/lib/pipeline-context";
 
 const riskStyle = (score: number) => {
   if (score >= 86) return { color: "#f43f5e", bg: "bg-rose-500/10 border-rose-500/40" };
@@ -26,14 +32,47 @@ const riskStyle = (score: number) => {
   return { color: "#34d399", bg: "bg-emerald-500/10 border-emerald-500/40" };
 };
 
-export function AnomaliesSection() {
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [alertsLoading, setAlertsLoading] = useState(true);
+let globalAlertsCache: { pipelineId: string | null; alerts: Alert[] } | null = null;
+let globalAlertsPromise: Promise<Alert[]> | null = null;
+
+export const clearAlertsCache = () => {
+  globalAlertsCache = null;
+  globalAlertsPromise = null;
+};
+
+export const prefetchAlerts = (pipelineId?: string | null): Promise<Alert[]> => {
+  if (globalAlertsCache && globalAlertsCache.pipelineId === (pipelineId || null)) {
+    return Promise.resolve(globalAlertsCache.alerts);
+  }
+  if (globalAlertsPromise) return globalAlertsPromise;
+
+  globalAlertsPromise = api.alerts(50, 200)
+    .then((res) => {
+      const list = res.results || [];
+      globalAlertsCache = { pipelineId: pipelineId || null, alerts: list };
+      return list;
+    })
+    .catch((err) => {
+      globalAlertsPromise = null;
+      throw err;
+    });
+  return globalAlertsPromise;
+};
+
+export const AnomaliesSection = React.memo(function AnomaliesSection() {
+  const [alerts, setAlerts] = useState<Alert[]>(() => globalAlertsCache?.alerts || []);
+  const [alertsLoading, setAlertsLoading] = useState<boolean>(() => !globalAlertsCache?.alerts?.length);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
   const [panelPayload, setPanelPayload] = useState<any>(null);
   const [panelBusy, setPanelBusy] = useState(false);
+  const [fetchKey, setFetchKey] = useState(0);
+
+  const { isAnomaliesReady, loading: pipelineLoading, pipeline } = usePipeline();
+
+  // Track previous value to detect false→true transition
+  const prevAnomaliesReady = useRef<boolean>(false);
 
   const openDossier = async (kind: string, value: string) => {
     if (!value) return;
@@ -48,18 +87,50 @@ export function AnomaliesSection() {
     }
   };
 
+  // Primary data fetch effect
   useEffect(() => {
+    // CRITICAL: Do NOT bail out while the pipeline context is still loading.
+    if (pipelineLoading) {
+      setAlertsLoading(true);
+      return;
+    }
+
+    if (!isAnomaliesReady) {
+      // Pipeline is loaded but anomaly detection isn't done yet
+      setAlertsLoading(false);
+      return;
+    }
+
+    if (globalAlertsCache && globalAlertsCache.pipelineId === (pipeline?.job_id || null)) {
+      setAlerts(globalAlertsCache.alerts);
+      setAlertsLoading(false);
+      return;
+    }
+
+    // Anomaly detection is ready — fetch alerts
     setAlertsLoading(true);
-    api.alerts(50, 200)
-      .then((res) => setAlerts(res.results || []))
+    prefetchAlerts(pipeline?.job_id)
+      .then((list) => setAlerts(list))
       .catch((error) => {
         const err = error as { status?: number };
-        if (err.status !== 409) {
+        if (err.status !== 409 && !isPipelineNotReady(error)) {
           toast.error("Failed to load anomaly alerts. Is the backend running?");
         }
+        setAlerts([]);
       })
       .finally(() => setAlertsLoading(false));
-  }, []);
+  }, [isAnomaliesReady, pipelineLoading, fetchKey, pipeline?.job_id]);
+
+  // Detect isAnomaliesReady false→true transition — auto-refetch when anomalies complete
+  useEffect(() => {
+    if (!prevAnomaliesReady.current && isAnomaliesReady) {
+      // Anomaly detection just completed — trigger background prefetch
+      clearAlertsCache();
+      prefetchAlerts(pipeline?.job_id).catch(() => {});
+      setFetchKey((k) => k + 1);
+    }
+    prevAnomaliesReady.current = isAnomaliesReady;
+  }, [isAnomaliesReady, pipeline?.job_id]);
 
   const downloadSTR = async () => {
     try {
@@ -77,6 +148,50 @@ export function AnomaliesSection() {
     );
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+  };
+
+  // Determine what empty-state message to show
+  const renderEmptyState = () => {
+    if (pipelineLoading || alertsLoading) {
+      return (
+        <div className="p-8 text-center text-muted-foreground">
+          <Loader2 className="mx-auto mb-3 size-7 animate-spin text-red-500" />
+          <p className="text-sm animate-pulse">Loading anomaly detection feed...</p>
+        </div>
+      );
+    }
+    if (!isAnomaliesReady) {
+      const stage = pipeline?.status ?? "IDLE";
+      const isProcessing = ["PARSING", "FUSING", "FUSED_READY", "SCORING", "GRAPHS"].includes(stage);
+      return (
+        <div className="p-8 text-center text-muted-foreground">
+          {isProcessing ? (
+            <>
+              <Clock className="mx-auto mb-3 size-7 text-amber-500 animate-pulse" />
+              <p className="text-sm font-semibold text-amber-400">
+                Anomaly detection is running — {stage}
+              </p>
+              <p className="mt-1 text-xs">
+                Results will appear automatically when scoring completes.
+                {stage === "SCORING" && " This may take a few minutes for large datasets."}
+              </p>
+            </>
+          ) : (
+            <>
+              <ShieldAlert className="mx-auto mb-3 size-7 opacity-30" />
+              <p className="text-sm">No anomalies above risk 50 found. Ingest data first.</p>
+            </>
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="p-8 text-center text-muted-foreground">
+        <ShieldAlert className="mx-auto mb-3 size-7 opacity-30" />
+        <p className="text-sm">No anomalies above risk 50 found in the current dataset.</p>
+        <p className="mt-1 text-xs text-muted-foreground/60">All transactions are within acceptable risk parameters.</p>
+      </div>
+    );
   };
 
   return (
@@ -97,11 +212,19 @@ export function AnomaliesSection() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-auto">
-          {alertsLoading ? (
-            <div className="p-8 text-center text-muted-foreground animate-pulse">Loading anomalies...</div>
+        <div className="flex-1 overflow-auto relative">
+          {alertsLoading && alerts.length > 0 && (
+            <div className="absolute top-0 left-0 right-0 z-20 h-1 bg-red-500/20 overflow-hidden">
+              <div className="h-full bg-red-500 animate-pulse w-full" />
+            </div>
+          )}
+          {alertsLoading && alerts.length === 0 ? (
+            <div className="p-8 text-center text-muted-foreground">
+              <Loader2 className="mx-auto mb-3 size-7 animate-spin text-red-500" />
+              <p className="text-sm animate-pulse">Loading anomaly detection feed...</p>
+            </div>
           ) : alerts.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground">No anomalies above risk 50 found. Ingest data first.</div>
+            renderEmptyState()
           ) : (
             <div className="overflow-auto">
               <table className="w-full text-sm">
@@ -349,4 +472,4 @@ export function AnomaliesSection() {
       )}
     </div>
   );
-}
+});

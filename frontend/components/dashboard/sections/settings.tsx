@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,7 +9,7 @@ import { Server, Database, Trash2, RefreshCw, Loader2 } from "lucide-react";
 import { api, type IngestStatus } from "@/lib/api";
 import { toast } from "sonner";
 
-export function SettingsSection() {
+export const SettingsSection = React.memo(function SettingsSection() {
   const [status, setStatus] = useState<IngestStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState(false);
@@ -132,4 +132,4 @@ export function SettingsSection() {
       </div>
     </div>
   );
-}
+});

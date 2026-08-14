@@ -30,6 +30,7 @@ anomaly UI can cite exactly why a record is risky.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import threading
 
@@ -103,22 +104,74 @@ def _compute(bundle: dict) -> dict:
                           "graph": {"nodes": 0, "edges": 0, "communities": 0},
                           "ensemble_detectors": [], "ensemble_fitted": False}}
 
-    # ---- engine outputs ------------------------------------------------
-    behavioural = score_transactions(bundle)
-    heat = fraud_heat(bundle)
+    # ---- Group 1: Fully independent engines run in parallel ----------------
+    # These engines only need `bundle` as input. They have no data dependencies
+    # on each other and can safely run concurrently.
+    from concurrent.futures import ThreadPoolExecutor, wait, FIRST_EXCEPTION
+
+    g1_results: dict = {}
+
+    def _run_behavioural(): return ("behavioural", score_transactions(bundle))
+    def _run_heat(): return ("heat", fraud_heat(bundle))
+    def _run_ensemble(): return ("ens", ensemble_scores(bundle))
+    def _run_txn_ml(): return ("tml", txn_ml_scores(bundle))
+    def _run_prof_txn(): return ("prof_txn", profile_deviation(bundle))
+    def _run_prof_acc(): return ("prof_acc", account_profile_deviation(bundle))
+    def _run_temporal_txn(): return ("temporal_txn", txn_temporal_scores(bundle))
+    def _run_temporal_acc(): return ("acc_temporal", account_temporal_scores(bundle))
+    def _run_telecom(): return ("telecom", telecom_scores(bundle))
+    def _run_internet(): return ("internet", internet_scores(bundle))
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futs = [
+            executor.submit(_run_behavioural),
+            executor.submit(_run_heat),
+            executor.submit(_run_ensemble),
+            executor.submit(_run_txn_ml),
+            executor.submit(_run_prof_txn),
+            executor.submit(_run_prof_acc),
+            executor.submit(_run_temporal_txn),
+            executor.submit(_run_temporal_acc),
+            executor.submit(_run_telecom),
+            executor.submit(_run_internet),
+        ]
+        for f in futs:
+            key, val = f.result()  # re-raises any exceptions from workers
+            g1_results[key] = val
+
+    behavioural = g1_results["behavioural"]
+    heat = g1_results["heat"]
+    ens = g1_results["ens"]
+    tml = g1_results["tml"]
+    prof_txn = g1_results["prof_txn"]
+    prof_acc = g1_results["prof_acc"]
+    temporal_txn = g1_results["temporal_txn"]
+    acc_temporal = g1_results["acc_temporal"]
+    telecom = g1_results["telecom"]
+    internet = g1_results["internet"]
+
     heat_by_acc = {a["account_no"]: a for a in heat["accounts"]}
-    ens = ensemble_scores(bundle)
     ens_by_acc = {a["account_no"]: a for a in ens["accounts"]}
-    tml = txn_ml_scores(bundle)
-    prof_txn = profile_deviation(bundle)
-    prof_acc = account_profile_deviation(bundle)
-    temporal_txn = txn_temporal_scores(bundle)
-    acc_temporal = account_temporal_scores(bundle)
-    telecom = telecom_scores(bundle)
-    internet = internet_scores(bundle)
-    moneyflow = money_flow_analysis(bundle)
-    entity = entity_risk(bundle)
-    gfeats, gmeta = graph_features(bundle)
+
+    # ---- Group 2: Engines that depend on group 1 results -------------------
+    def _run_moneyflow(): return ("moneyflow", money_flow_analysis(bundle))
+    def _run_entity(): return ("entity", entity_risk(bundle))
+    def _run_graph(): return ("gfeats", graph_features(bundle))
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futs2 = [
+            executor.submit(_run_moneyflow),
+            executor.submit(_run_entity),
+            executor.submit(_run_graph),
+        ]
+        g2_results: dict = {}
+        for f in futs2:
+            key, val = f.result()
+            g2_results[key] = val
+
+    moneyflow = g2_results["moneyflow"]
+    entity = g2_results["entity"]
+    gfeats, gmeta = g2_results["gfeats"]
 
     beh_by_id = {b["transaction_id"]: b for b in behavioural}
 
@@ -137,6 +190,12 @@ def _compute(bundle: dict) -> dict:
     flow_by_acc = moneyflow["accounts"]
     ent_by_acc = entity["account_exposure"]
 
+    hw = hybrid_weights()
+    w_trules, w_tml, w_tbeh = hw.get("txn_rules", 0.30), hw.get("txn_ml", 0.20), hw.get("txn_behaviour", 0.25)
+    w_ttemp, w_ttel, w_tnet = hw.get("txn_temporal", 0.10), hw.get("txn_telecom", 0.10), hw.get("txn_internet", 0.05)
+    w_ttotal = w_trules + w_tml + w_tbeh + w_ttemp + w_ttel + w_tnet
+    inv_ttotal = (1.0 / w_ttotal) if w_ttotal > 0 else 0.0
+
     # ---- per-transaction hybrid ----------------------------------------
     transactions: dict[str, dict] = {}
     skipped = 0
@@ -152,14 +211,15 @@ def _compute(bundle: dict) -> dict:
         temp = temporal_txn.get(tid, {})
         tel = telecom["txn"].get(tid, {})
         net = internet["txn"].get(tid, {})
-        hybrid = renormalise({
-            "txn_rules": rules_score,
-            "txn_ml": ml_score,
-            "txn_behaviour": float(prof.get("score", 0.0)),
-            "txn_temporal": float(temp.get("temporal_score", 0.0)),
-            "txn_telecom": float(tel.get("call_assist_score", 0.0)),
-            "txn_internet": float(net.get("internet_score", 0.0)),
-        })
+        beh_val = float(prof.get("score", 0.0))
+        temp_val = float(temp.get("temporal_score", 0.0))
+        tel_val = float(tel.get("call_assist_score", 0.0))
+        net_val = float(net.get("internet_score", 0.0))
+
+        raw_sum = (w_trules * rules_score + w_tml * ml_score + w_tbeh * beh_val
+                   + w_ttemp * temp_val + w_ttel * tel_val + w_tnet * net_val)
+        hybrid = round(min(100.0, max(0.0, raw_sum * inv_ttotal)), 2)
+
         rec = dict(b)
         rec.update({
             "risk_score": hybrid,
@@ -167,16 +227,12 @@ def _compute(bundle: dict) -> dict:
             "hybrid_components": {
                 "rules": round(rules_score, 2),
                 "ml": round(ml_score, 2),
-                "behaviour": round(float(prof.get("score", 0.0)), 2),
-                "temporal": round(float(temp.get("temporal_score", 0.0)), 2),
-                "telecom": round(float(tel.get("call_assist_score", 0.0)), 2),
-                "internet": round(float(net.get("internet_score", 0.0)), 2),
+                "behaviour": round(beh_val, 2),
+                "temporal": round(temp_val, 2),
+                "telecom": round(tel_val, 2),
+                "internet": round(net_val, 2),
             },
-            "models_fired": _models_fired(rules_score, ml_score,
-                                          float(prof.get("score", 0.0)),
-                                          float(temp.get("temporal_score", 0.0)),
-                                          float(tel.get("call_assist_score", 0.0)),
-                                          float(net.get("internet_score", 0.0))),
+            "models_fired": _models_fired(rules_score, ml_score, beh_val, temp_val, tel_val, net_val),
             "scenarios": txn_scen.get(tid, []),
         })
         transactions[tid] = rec
@@ -201,7 +257,7 @@ def _compute(bundle: dict) -> dict:
             "acc_graph": float(_graph_score(graph)),
             "acc_entity": float(ent.get("entity_risk", 0.0)),
             "acc_moneyflow": float(flow.get("flow_score", 0.0)),
-        })
+        }, weights=hw)
         accounts[acc] = {
             "account_no": acc,
             "risk_score": hybrid,
@@ -240,7 +296,7 @@ def _compute(bundle: dict) -> dict:
                 "ent_temporal": 0.0,
                 "ent_telecom": _phone_telecom(telecom, kind, entity_id),
                 "ent_internet": _phone_internet(internet, kind, entity_id),
-            })
+            }, weights=hw)
             entities[f"{kind}:{entity_id}"] = {
                 "entity": entity_id,
                 "kind": kind,
@@ -412,23 +468,34 @@ def _txn_timeline(bundle: dict, txn: dict) -> list[dict]:
     events = []
     phone = txn.get("sender_phone") or ""
     w = 3600
-    for r in bundle.get("cdr", []):
-        rts = float(r.get("ts") or 0.0)
-        if rts and abs(rts - ts) <= w:
-            a, b = r.get("a_number") or "", r.get("b_number") or ""
-            if phone and phone not in (a, b):
-                continue
-            events.append({"kind": "call", "ts": rts,
-                           "detail": f"{a} -> {b} "
-                                     f"({r.get('duration_sec')}s)"})
-    for r in bundle.get("ipdr", []):
-        rts = float(r.get("start_ts") or 0.0)
-        if rts and abs(rts - ts) <= w:
-            if phone and r.get("msisdn") != phone:
-                continue
-            events.append({"kind": "session", "ts": rts,
-                           "detail": f"{r.get('msisdn')} "
-                                     f"@ {r.get('ip') or '?'}"})
+    from backend.events import _get_ts_indexes
+    idx = _get_ts_indexes(bundle)
+    
+    cts, cr = idx["cdr_ts"], idx["cdr_r"]
+    i0 = bisect.bisect_left(cts, ts - w)
+    i1 = bisect.bisect_right(cts, ts + w)
+    for i in range(i0, min(i1, i0 + 30)):
+        r = cr[i]
+        a, b = r.get("a_number") or "", r.get("b_number") or ""
+        if phone and phone not in (a, b):
+            continue
+        events.append({"kind": "call", "ts": cts[i],
+                       "detail": f"{a} -> {b} ({r.get('duration_sec')}s)"})
+        if len(events) >= 12:
+            break
+
+    its, ir = idx["ipdr_ts"], idx["ipdr_r"]
+    i0 = bisect.bisect_left(its, ts - w)
+    i1 = bisect.bisect_right(its, ts + w)
+    for i in range(i0, min(i1, i0 + 30)):
+        r = ir[i]
+        if phone and r.get("msisdn") != phone:
+            continue
+        events.append({"kind": "session", "ts": its[i],
+                       "detail": f"{r.get('msisdn')} @ {r.get('ip') or '?'}"})
+        if len(events) >= 20:
+            break
+
     events.sort(key=lambda e: e["ts"])
     return events[:12]
 
@@ -437,15 +504,22 @@ def _neighbours(bundle: dict, txn: dict) -> list[dict]:
     """Other transactions from the same customer nearby in time."""
     cust = txn.get("sender_customer_id") or txn.get("account_no") or ""
     ts = float(txn.get("ts") or 0.0)
+    if not ts:
+        return []
     out = []
-    for r in bundle.get("bank", []):
+    from backend.events import _get_ts_indexes
+    idx = _get_ts_indexes(bundle)
+    bts, br = idx["bank_ts"], idx["bank_r"]
+    i0 = bisect.bisect_left(bts, ts - 3600)
+    i1 = bisect.bisect_right(bts, ts + 3600)
+    for i in range(i0, min(i1, i0 + 50)):
+        r = br[i]
         if r.get("customer_id") != cust and r.get("account_no") != cust:
             continue
-        rts = float(r.get("ts") or 0.0)
-        if rts and abs(rts - ts) <= 3600 and r.get("txn_id") != txn.get("txn_id"):
+        if r.get("txn_id") != txn.get("txn_id"):
             out.append({"transaction_id": r.get("txn_id"),
                         "amount": r.get("debit") or r.get("credit") or 0,
-                        "ts": rts})
+                        "ts": bts[i]})
         if len(out) >= 6:
             break
     return out

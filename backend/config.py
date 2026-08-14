@@ -47,6 +47,7 @@ DEFAULTS = {
     "ANOMALY_CONTAMINATION": "0.05",
     "MAX_UPLOAD_FILES": "50",
     "DATABASE_URL": "",
+    "PIPELINE_MODE": "production_safe",
 }
 
 
@@ -141,6 +142,10 @@ def anomaly_contamination() -> float:
 
 def max_upload_files() -> int:
     return max(1, _int("MAX_UPLOAD_FILES", 50))
+
+
+def pipeline_mode() -> str:
+    return _get("PIPELINE_MODE", "production_safe")
 
 
 def groq_api_keys() -> list[str]:

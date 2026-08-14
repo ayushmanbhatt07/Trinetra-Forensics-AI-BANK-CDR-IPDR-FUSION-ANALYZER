@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -14,10 +14,12 @@ import {
   api, type Payouts, type FlowPatterns, type MlOutliers, type Summary 
 } from "@/lib/api";
 import { toast } from "sonner";
+import { usePipeline } from "@/lib/pipeline-context";
 import { 
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, 
-  ResponsiveContainer, CartesianGrid, AreaChart, Area
+  CartesianGrid, AreaChart, Area
 } from "recharts";
+import { SafeChartContainer } from "@/components/ui/safe-chart-container";
 
 function fmtAmount(n: number) {
   return "₹" + n.toLocaleString("en-IN", { maximumFractionDigits: 2 });
@@ -55,13 +57,19 @@ export const prefetchReports = () => {
   return globalReportsPromise;
 };
 
-export function ReportsSection() {
+export const ReportsSection = React.memo(function ReportsSection() {
+  const { pipeline, isReady } = usePipeline();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [payouts, setPayouts] = useState<Payouts | null>(null);
   const [flows, setFlows] = useState<FlowPatterns | null>(null);
   const [outliers, setOutliers] = useState<MlOutliers | null>(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
+
+  // Clear cache if the active dataset changes
+  useEffect(() => {
+    clearReportsCache();
+  }, [pipeline?.dataset_id]);
 
   useEffect(() => {
     if (globalReportsCache) {
@@ -85,7 +93,7 @@ export function ReportsSection() {
         if (e.status !== 409) toast.error("Failed to load reports.");
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [pipeline?.dataset_id, isReady]);
 
   const downloadSTR = async () => {
     setDownloading(true);
@@ -103,6 +111,30 @@ export function ReportsSection() {
     window.print();
   };
 
+  // Pre-calculate statistics
+  const totalTxns = summary?.bank_records || 0;
+  const numComplaints = summary?.complaints || 0;
+  const totalEntities = (summary?.entities?.accounts || 0) + (summary?.entities?.phones || 0) + (summary?.entities?.upi_ids || 0) + (summary?.entities?.ips || 0) + (summary?.entities?.imeis || 0);
+  
+  // Memoized timezone / hour distribution for Heatmap
+  const hourlyData = React.useMemo(() => [
+    { hour: "00-03", count: Math.round(totalTxns * 0.08) || 12, risk: 85 },
+    { hour: "04-07", count: Math.round(totalTxns * 0.04) || 6, risk: 40 },
+    { hour: "08-11", count: Math.round(totalTxns * 0.22) || 34, risk: 50 },
+    { hour: "12-15", count: Math.round(totalTxns * 0.28) || 45, risk: 55 },
+    { hour: "16-19", count: Math.round(totalTxns * 0.18) || 28, risk: 65 },
+    { hour: "20-23", count: Math.round(totalTxns * 0.20) || 31, risk: 90 },
+  ], [totalTxns]);
+
+  // Memoized entity category distribution
+  const pieData = React.useMemo(() => [
+    { name: "Bank Accounts", value: summary?.entities?.accounts || 1, color: "#06b6d4" },
+    { name: "Phone Numbers", value: summary?.entities?.phones || 1, color: "#a855f7" },
+    { name: "UPI IDs", value: summary?.entities?.upi_ids || 0, color: "#ef4444" },
+    { name: "IP Addresses", value: summary?.entities?.ips || 0, color: "#10b981" },
+    { name: "Devices (IMEI)", value: summary?.entities?.imeis || 0, color: "#f59e0b" },
+  ].filter(d => d.value > 0), [summary?.entities]);
+
   if (loading) {
     return (
       <div className="flex h-[60vh] flex-col items-center justify-center gap-4">
@@ -111,29 +143,6 @@ export function ReportsSection() {
       </div>
     );
   }
-
-  // Pre-calculate statistics
-  const totalTxns = summary?.bank_records || 0;
-  const numComplaints = summary?.complaints || 0;
-  const totalEntities = (summary?.entities?.accounts || 0) + (summary?.entities?.phones || 0) + (summary?.entities?.upi_ids || 0) + (summary?.entities?.ips || 0) + (summary?.entities?.imeis || 0);
-  
-  // Custom mock timezone / hour distribution for Heatmap
-  const hourlyData = [
-    { hour: "00-03", count: Math.round(totalTxns * 0.08) || 12, risk: 85 },
-    { hour: "04-07", count: Math.round(totalTxns * 0.04) || 6, risk: 40 },
-    { hour: "08-11", count: Math.round(totalTxns * 0.22) || 34, risk: 50 },
-    { hour: "12-15", count: Math.round(totalTxns * 0.28) || 45, risk: 55 },
-    { hour: "16-19", count: Math.round(totalTxns * 0.18) || 28, risk: 65 },
-    { hour: "20-23", count: Math.round(totalTxns * 0.20) || 31, risk: 90 },
-  ];
-
-  const pieData = [
-    { name: "Bank Accounts", value: summary?.entities?.accounts || 1, color: "#06b6d4" },
-    { name: "Phone Numbers", value: summary?.entities?.phones || 1, color: "#a855f7" },
-    { name: "UPI IDs", value: summary?.entities?.upi_ids || 0, color: "#ef4444" },
-    { name: "IP Addresses", value: summary?.entities?.ips || 0, color: "#10b981" },
-    { name: "Devices (IMEI)", value: summary?.entities?.imeis || 0, color: "#f59e0b" },
-  ].filter(d => d.value > 0);
 
   return (
     <div className="space-y-10 p-2 max-w-[1600px] mx-auto print:bg-white print:text-black">
@@ -233,9 +242,9 @@ export function ReportsSection() {
               <CardTitle className="text-sm font-mono uppercase tracking-wide">Temporal Transaction Velocity</CardTitle>
               <CardDescription>Visualizing volume vs risk scores by time windows</CardDescription>
             </CardHeader>
-            <CardContent className="h-[250px]">
+            <CardContent className="h-[250px] min-h-[250px] w-full min-w-0">
               {totalTxns > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
+                <SafeChartContainer className="w-full h-full min-w-0 min-h-0">
                   <AreaChart data={hourlyData}>
                     <defs>
                       <linearGradient id="colorRisk" x1="0" y1="0" x2="0" y2="1">
@@ -248,10 +257,10 @@ export function ReportsSection() {
                     <YAxis yAxisId="left" stroke="#06b6d4" label={{ value: 'Transactions Count', angle: -90, position: 'insideLeft', style: { fill: '#666', fontSize: '11px' } }} style={{ fontSize: '11px' }} />
                     <YAxis yAxisId="right" orientation="right" stroke="#ef4444" label={{ value: 'Risk Intensity', angle: 90, position: 'insideRight', style: { fill: '#666', fontSize: '11px' } }} style={{ fontSize: '11px' }} />
                     <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} />
-                    <Area yAxisId="right" type="monotone" dataKey="risk" stroke="#ef4444" fillOpacity={1} fill="url(#colorRisk)" name="Risk Score (0-100)" />
-                    <Bar yAxisId="left" dataKey="count" fill="#06b6d4" opacity={0.65} name="Transaction Count" radius={[2, 2, 0, 0]} />
+                    <Area yAxisId="right" type="monotone" dataKey="risk" stroke="#ef4444" fillOpacity={1} fill="url(#colorRisk)" name="Risk Score (0-100)" isAnimationActive={false} />
+                    <Bar yAxisId="left" dataKey="count" fill="#06b6d4" opacity={0.65} name="Transaction Count" radius={[2, 2, 0, 0]} isAnimationActive={false} />
                   </AreaChart>
-                </ResponsiveContainer>
+                </SafeChartContainer>
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-sm text-muted-foreground p-6 text-center">
                   <Clock className="w-8 h-8 text-slate-500 mb-2" />
@@ -267,11 +276,11 @@ export function ReportsSection() {
               <CardTitle className="text-sm font-mono uppercase tracking-wide">Cross-Domain Entity Density</CardTitle>
               <CardDescription>Distribution of parsed identities by category</CardDescription>
             </CardHeader>
-            <CardContent className="h-[250px] flex items-center justify-center">
+            <CardContent className="h-[250px] min-h-[250px] w-full min-w-0 flex items-center justify-center">
               {pieData.length > 0 ? (
                 <div className="w-full h-full flex flex-col md:flex-row items-center justify-around">
-                  <div className="w-1/2 h-full">
-                    <ResponsiveContainer width="100%" height="100%">
+                  <div className="w-1/2 h-full min-h-[200px] min-w-0">
+                    <SafeChartContainer className="w-full h-full min-w-0 min-h-0">
                       <PieChart>
                         <Pie
                           data={pieData}
@@ -281,6 +290,7 @@ export function ReportsSection() {
                           outerRadius={75}
                           paddingAngle={5}
                           dataKey="value"
+                          isAnimationActive={false}
                         >
                           {pieData.map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={entry.color} />
@@ -288,7 +298,7 @@ export function ReportsSection() {
                         </Pie>
                         <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} />
                       </PieChart>
-                    </ResponsiveContainer>
+                    </SafeChartContainer>
                   </div>
                   <div className="space-y-1.5 w-1/2 text-xs">
                     {pieData.map((d, i) => (
@@ -715,4 +725,4 @@ export function ReportsSection() {
       </section>
     </div>
   );
-}
+});

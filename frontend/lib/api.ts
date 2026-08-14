@@ -102,6 +102,7 @@ export interface PipelineStatus {
   anomalies_ready?: boolean;
   graphs_ready?: boolean;
   dataset_id: string | null;
+  job_id?: string | null;
   error?: string | null;
 }
 
@@ -128,7 +129,7 @@ export function apiBaseUrl(): string {
 
 function bearerToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem("backend_token");
+  return window.sessionStorage.getItem("backend_token");
 }
 
 export class ApiError extends Error {
@@ -854,20 +855,32 @@ export const api = {
       `STR_${kind}_${value.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 32)}.pdf`
     );
   },
-  fused: (offset = 0, limit = 25, q = "", account = "", mode = "", riskAnnotate = false) => {
-    const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
-    if (q) params.set("q", q);
-    if (account) params.set("account", account);
-    if (mode && mode !== "all") params.set("mode", mode);
-    if (riskAnnotate) params.set("risk_annotate", "1");
+  fused: (offset = 0, limit = 25, q = "", account = "", mode = "", riskAnnotate = false,
+          dateStart = "", dateEnd = "", minAmount = 0.0, maxAmount = 0.0, riskBand = "") => {
+    const params = new URLSearchParams({
+      offset: offset.toString(),
+      limit: limit.toString(),
+      q, account, mode,
+      risk_annotate: riskAnnotate ? "1" : "0",
+      date_start: dateStart,
+      date_end: dateEnd,
+      min_amount: minAmount.toString(),
+      max_amount: maxAmount.toString(),
+      risk_band: riskBand
+    });
     return request<FusedPage>(`/data/fused?${params.toString()}`);
   },
 
-  fusedCsv: async (q = "", account = "", mode = ""): Promise<void> => {
+  fusedCsv: async (q = "", account = "", mode = "", dateStart = "", dateEnd = "", minAmount = 0.0, maxAmount = 0.0, riskBand = ""): Promise<void> => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
     if (account) params.set("account", account);
     if (mode && mode !== "all") params.set("mode", mode);
+    if (dateStart) params.set("date_start", dateStart);
+    if (dateEnd) params.set("date_end", dateEnd);
+    if (minAmount > 0) params.set("min_amount", minAmount.toString());
+    if (maxAmount > 0) params.set("max_amount", maxAmount.toString());
+    if (riskBand) params.set("risk_band", riskBand);
     const token = bearerToken();
     const res = await fetch(
       apiBaseUrl() + `/data/fused.csv?${params.toString()}`,
@@ -925,8 +938,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  copilotEntityDetails: (entityId: string) =>
-    request<any>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/details`),
+  copilotEntityDetails: (entityId: string, includeAudit = false) =>
+    request<any>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/details?include_audit=${includeAudit}`),
+  copilotEntityAudit: (entityId: string) =>
+    request<{ entity_id: string; audit_report: string }>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/audit`),
   copilotLlmTree: (entityId: string, maxHops = 3) =>
     request<LlmTreeResult>("/api/v1/copilot/llm-tree", {
       method: "POST",

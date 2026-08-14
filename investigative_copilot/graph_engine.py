@@ -48,15 +48,26 @@ class CopilotGraphEngine:
                     self.graph.add_edge(r_acc, r_phone, edge_type="account_phone_link")
 
             if s_acc and r_acc:
-                # Add directed money flow edge
+                tx_id = str(r["transaction_id"]) if r.get("transaction_id") else None
+                amt = float(r["transaction_amount"]) if r.get("transaction_amount") is not None else 0.0
+                ts = str(r.get("timestamp") or "")
+                mode = str(r.get("transaction_mode") or "")
+                
+                # Add direct bank transfer edge between accounts for money flow branches
                 self.graph.add_edge(
                     s_acc, r_acc,
                     edge_type="bank_transfer",
-                    amount=float(r["transaction_amount"]) if r["transaction_amount"] is not None else 0.0,
-                    timestamp=str(r["timestamp"]),
-                    tx_id=str(r["transaction_id"]),
-                    mode=str(r["transaction_mode"])
+                    amount=amt,
+                    timestamp=ts,
+                    tx_id=tx_id or "",
+                    mode=mode
                 )
+
+                # Add Txn node as an addon node attached to accounts
+                if tx_id:
+                    self.graph.add_node(tx_id, type="txn", name=f"Txn {tx_id}", amount=amt, timestamp=ts, mode=mode)
+                    self.graph.add_edge(s_acc, tx_id, edge_type="bank_transfer", amount=amt, tx_id=tx_id)
+                    self.graph.add_edge(tx_id, r_acc, edge_type="bank_transfer", amount=amt, tx_id=tx_id)
 
         # 2. Add CDR Call Edges (Phone -> Phone)
         cursor.execute("""
@@ -145,12 +156,13 @@ class CopilotGraphEngine:
         # 1. Resolve Transaction ID -> Account Node
         if start_node not in self.graph:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT receiver_account_number, sender_account_number FROM bank_transactions WHERE transaction_id = ?", (start_node,))
+            cursor.execute("SELECT transaction_id, receiver_account_number, sender_account_number FROM bank_transactions WHERE transaction_id = ?", (start_node,))
             row_tx = cursor.fetchone()
             if row_tx:
+                tx_id = str(row_tx["transaction_id"])
                 rec_acc = str(row_tx["receiver_account_number"]) if row_tx["receiver_account_number"] else None
                 send_acc = str(row_tx["sender_account_number"]) if row_tx["sender_account_number"] else None
-                start_node = rec_acc or send_acc or start_node
+                start_node = tx_id if tx_id in self.graph else (rec_acc or send_acc or start_node)
 
         # 2. Resolve CDR ID -> Phone Node
         if start_node not in self.graph:
