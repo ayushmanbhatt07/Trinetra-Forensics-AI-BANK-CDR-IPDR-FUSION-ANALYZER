@@ -46,18 +46,13 @@ DEFAULTS = {
     "DETECT_MIN_CONFIDENCE": "0.55",
     "ANOMALY_CONTAMINATION": "0.05",
     "MAX_UPLOAD_FILES": "50",
-    "DATABASE_URL": "",
+    "SQLITE_DB_NAME": "backend.db",
     "PIPELINE_MODE": "production_safe",
 }
 
 
-def database_url() -> str:
-    # First check standard DATABASE_URL (Render style)
-    url = os.environ.get("DATABASE_URL")
-    if url:
-        return url.strip()
-    # Then check APP_DATABASE_URL
-    return _get("DATABASE_URL", "").strip()
+def sqlite_db_name() -> str:
+    return _get("SQLITE_DB_NAME", "backend.db").strip()
 
 
 
