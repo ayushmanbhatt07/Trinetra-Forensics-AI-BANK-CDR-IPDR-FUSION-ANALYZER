@@ -68,17 +68,23 @@ export const FusedSection = React.memo(function FusedSection() {
   const prevFusedReady = useRef<boolean>(false);
   const prevAnomaliesReady = useRef<boolean>(false);
 
-  // Clear cache on dataset change
+  // Clear cache on dataset or pipeline status change
   useEffect(() => {
     fusedCacheRef.current.clear();
-  }, [pipeline?.dataset_id]);
+    setFusedKey((k) => k + 1);
+  }, [pipeline?.dataset_id, pipeline?.status, isFusedReady]);
+
+  // Listen for pipeline stage transition events
+  useEffect(() => {
+    const handleFusedReady = () => {
+      fusedCacheRef.current.clear();
+      setFusedKey((k) => k + 1);
+    };
+    window.addEventListener("pipeline:fused_ready", handleFusedReady);
+    return () => window.removeEventListener("pipeline:fused_ready", handleFusedReady);
+  }, []);
 
   const loadFused = useCallback(() => {
-    if (pipelineLoading) {
-      setFusedLoading(true);
-      return;
-    }
-
     if (!isFusedReady && !pipeline?.dataset_id) {
       setFusedLoading(false);
       return;
@@ -105,30 +111,20 @@ export const FusedSection = React.memo(function FusedSection() {
       })
       .catch((error) => {
         const err = error as { status?: number };
-        if (err.status !== 409 && !isPipelineNotReady(error)) {
-          toast.error("Failed to load fused records. Is the backend running?");
+        if (err.status !== 409 && err.status !== 425 && !isPipelineNotReady(error)) {
+          toast.error("Failed to load fused records.");
         }
         setRows([]);
         setTotal(0);
       })
       .finally(() => setFusedLoading(false));
-  }, [offset, q, riskAnnotate, isFusedReady, isAnomaliesReady, pipelineLoading, dateStart, dateEnd, minAmount, maxAmount, riskBand, pipeline?.dataset_id]);
+  }, [offset, q, riskAnnotate, isFusedReady, isAnomaliesReady, dateStart, dateEnd, minAmount, maxAmount, riskBand, pipeline?.dataset_id]);
 
   // Primary effect: re-run loadFused whenever its dependencies change.
   useEffect(() => {
     const t = setTimeout(loadFused, q ? 200 : 0);
     return () => clearTimeout(t);
   }, [loadFused, fusedKey]);
-
-  // Secondary effect: detect isFusedReady or isAnomaliesReady transitions and trigger an immediate refetch.
-  useEffect(() => {
-    if ((!prevFusedReady.current && isFusedReady) || (!prevAnomaliesReady.current && isAnomaliesReady)) {
-      fusedCacheRef.current.clear();
-      setFusedKey((k) => k + 1);
-    }
-    prevFusedReady.current = isFusedReady;
-    prevAnomaliesReady.current = isAnomaliesReady;
-  }, [isFusedReady, isAnomaliesReady]);
 
   const downloadFusedCsv = async () => {
     const t = toast.loading("Preparing CSV...");

@@ -40,16 +40,17 @@ export const clearAlertsCache = () => {
   globalAlertsPromise = null;
 };
 
-export const prefetchAlerts = (pipelineId?: string | null): Promise<Alert[]> => {
-  if (globalAlertsCache && globalAlertsCache.pipelineId === (pipelineId || null)) {
+export const prefetchAlerts = (pipelineId?: string | null, force = false): Promise<Alert[]> => {
+  if (!force && globalAlertsCache && globalAlertsCache.pipelineId === (pipelineId || null)) {
     return Promise.resolve(globalAlertsCache.alerts);
   }
-  if (globalAlertsPromise) return globalAlertsPromise;
+  if (!force && globalAlertsPromise) return globalAlertsPromise;
 
   globalAlertsPromise = api.alerts(50, 200)
     .then((res) => {
       const list = res.results || [];
       globalAlertsCache = { pipelineId: pipelineId || null, alerts: list };
+      globalAlertsPromise = null;
       return list;
     })
     .catch((err) => {
@@ -61,7 +62,7 @@ export const prefetchAlerts = (pipelineId?: string | null): Promise<Alert[]> => 
 
 export const AnomaliesSection = React.memo(function AnomaliesSection() {
   const [alerts, setAlerts] = useState<Alert[]>(() => globalAlertsCache?.alerts || []);
-  const [alertsLoading, setAlertsLoading] = useState<boolean>(() => !globalAlertsCache?.alerts?.length);
+  const [alertsLoading, setAlertsLoading] = useState<boolean>(false);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
@@ -71,8 +72,11 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
 
   const { isAnomaliesReady, loading: pipelineLoading, pipeline } = usePipeline();
 
-  // Track previous value to detect false→true transition
-  const prevAnomaliesReady = useRef<boolean>(false);
+  // Clear cache whenever dataset_id changes
+  useEffect(() => {
+    clearAlertsCache();
+    setFetchKey((k) => k + 1);
+  }, [pipeline?.dataset_id]);
 
   const openDossier = async (kind: string, value: string) => {
     if (!value) return;
@@ -89,48 +93,52 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
 
   // Primary data fetch effect
   useEffect(() => {
-    // CRITICAL: Do NOT bail out while the pipeline context is still loading.
-    if (pipelineLoading) {
-      setAlertsLoading(true);
-      return;
-    }
+    let isMounted = true;
 
     if (!isAnomaliesReady) {
-      // Pipeline is loaded but anomaly detection isn't done yet
       setAlertsLoading(false);
       return;
     }
 
+    // Check if cache matches current pipeline job
     if (globalAlertsCache && globalAlertsCache.pipelineId === (pipeline?.job_id || null)) {
       setAlerts(globalAlertsCache.alerts);
       setAlertsLoading(false);
       return;
     }
 
-    // Anomaly detection is ready — fetch alerts
     setAlertsLoading(true);
-    prefetchAlerts(pipeline?.job_id)
-      .then((list) => setAlerts(list))
+    prefetchAlerts(pipeline?.job_id, true)
+      .then((list) => {
+        if (!isMounted) return;
+        setAlerts(list);
+      })
       .catch((error) => {
+        if (!isMounted) return;
         const err = error as { status?: number };
-        if (err.status !== 409 && !isPipelineNotReady(error)) {
-          toast.error("Failed to load anomaly alerts. Is the backend running?");
+        if (err.status !== 409 && err.status !== 425 && !isPipelineNotReady(error)) {
+          toast.error("Failed to load anomaly alerts.");
         }
         setAlerts([]);
       })
-      .finally(() => setAlertsLoading(false));
-  }, [isAnomaliesReady, pipelineLoading, fetchKey, pipeline?.job_id]);
+      .finally(() => {
+        if (isMounted) setAlertsLoading(false);
+      });
 
-  // Detect isAnomaliesReady false→true transition — auto-refetch when anomalies complete
+    return () => {
+      isMounted = false;
+    };
+  }, [isAnomaliesReady, pipeline?.status, pipeline?.job_id, pipeline?.dataset_id, fetchKey]);
+
+  // Listen for pipeline stage transition events
   useEffect(() => {
-    if (!prevAnomaliesReady.current && isAnomaliesReady) {
-      // Anomaly detection just completed — trigger background prefetch
+    const handleReady = () => {
       clearAlertsCache();
-      prefetchAlerts(pipeline?.job_id).catch(() => {});
       setFetchKey((k) => k + 1);
-    }
-    prevAnomaliesReady.current = isAnomaliesReady;
-  }, [isAnomaliesReady, pipeline?.job_id]);
+    };
+    window.addEventListener("pipeline:anomalies_ready", handleReady);
+    return () => window.removeEventListener("pipeline:anomalies_ready", handleReady);
+  }, []);
 
   const downloadSTR = async () => {
     try {

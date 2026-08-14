@@ -97,10 +97,16 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
         if (lastPrefetchedStageRef.current !== stageKey) {
           lastPrefetchedStageRef.current = stageKey;
           if (res.anomalies_ready || ANOMALY_STAGES.has(res.status)) {
-            prefetchAlerts(res.job_id).catch(() => {});
+            prefetchAlerts(res.job_id, true).catch(() => {});
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent("pipeline:anomalies_ready"));
+            }
           }
           if (res.fused_ready || FUSED_STAGES.has(res.status)) {
             api.summary().catch(() => {});
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent("pipeline:fused_ready"));
+            }
           }
         }
 

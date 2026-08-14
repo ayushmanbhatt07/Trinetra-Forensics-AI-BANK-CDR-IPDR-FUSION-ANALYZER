@@ -29,6 +29,16 @@ export const OverviewSection = React.memo(function OverviewSection() {
     load();
   }, [isFusedReady, isAnomaliesReady]);
 
+  useEffect(() => {
+    const handleRefresh = () => load();
+    window.addEventListener("pipeline:fused_ready", handleRefresh);
+    window.addEventListener("pipeline:anomalies_ready", handleRefresh);
+    return () => {
+      window.removeEventListener("pipeline:fused_ready", handleRefresh);
+      window.removeEventListener("pipeline:anomalies_ready", handleRefresh);
+    };
+  }, []);
+
 
   useEffect(() => {
     if (!summary) return;
