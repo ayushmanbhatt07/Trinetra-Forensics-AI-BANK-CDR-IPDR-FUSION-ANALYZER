@@ -23,7 +23,7 @@ from backend import config
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "openai/gpt-oss-20b"
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
