@@ -99,6 +99,7 @@ export interface PipelineStatus {
   progress: number;
   ready: boolean;
   dataset_id: string | null;
+  error?: string | null;
 }
 
 /**
