@@ -75,6 +75,8 @@ export function FusedSection() {
         setPipelineState(ps);
         if (ps && !ps.ready) {
            t = setTimeout(poll, 1000);
+        } else if (ps && ps.ready) {
+           window.dispatchEvent(new CustomEvent("nav:section", { detail: "anomalies" }));
         }
       } catch (e) { }
     };

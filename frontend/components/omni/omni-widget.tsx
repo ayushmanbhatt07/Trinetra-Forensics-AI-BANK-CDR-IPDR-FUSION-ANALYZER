@@ -66,6 +66,7 @@ export function OmniWidget() {
 
   useEffect(() => {
     let mounted = true;
+    let interval: NodeJS.Timeout;
     const checkStatus = () => {
       if (!user) return;
       api.status()
@@ -74,6 +75,7 @@ export function OmniWidget() {
             setIsIngested(res.loaded);
             if (res.loaded) {
               import("@/components/dashboard/sections/reports").then(m => m.prefetchReports().catch(()=>{}));
+              clearInterval(interval);
             }
           }
         })
@@ -83,7 +85,7 @@ export function OmniWidget() {
     };
 
     checkStatus();
-    const interval = setInterval(checkStatus, 5000);
+    interval = setInterval(checkStatus, 5000);
     return () => {
       mounted = false;
       clearInterval(interval);
