@@ -76,19 +76,20 @@ def _fingerprint(bundle: dict) -> tuple:
 
 def _fetch(bundle: dict) -> dict:
     key = _CACHE_KEY + ":" + repr(_fingerprint(bundle))
-    # Fast path: check cache without lock
-    hit = _cache.get(key)
+
+    with _cache_lock:
+        hit = _cache.get(key)
+
     if hit is not None:
         return hit
-    
-    # Cache miss: acquire lock and compute
+
+    result = _compute(bundle)
+
     with _cache_lock:
-        # Check again in case another thread already computed it
-        hit = _cache.get(key)
-        if hit is not None:
-            return hit
-            
-        result = _compute(bundle)
+        existing = _cache.get(key)
+        if existing is not None:
+            return existing
+
         _cache[key] = result
         return result
 
