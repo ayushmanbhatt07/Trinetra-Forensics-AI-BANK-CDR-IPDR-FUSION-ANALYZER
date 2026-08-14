@@ -15,7 +15,7 @@ import {
   Landmark, Phone, Smartphone, Globe, AtSign, User, FileDown, Loader2,
   AlertTriangle, ArrowUpDown, Clock, PhoneCall, Network, ShieldAlert,
   ChevronRight, BrainCircuit, Activity, Link as LinkIcon, Crosshair,
-  FileText, Code, Share2, PlusCircle, ExternalLink, ActivitySquare, History
+  FileText, Code, Share2, PlusCircle, ExternalLink, ActivitySquare, History, X
 } from "lucide-react";
 import { api, type DossierIntelligence, type RelationshipIntel } from "@/lib/api";
 import { toast } from "sonner";
@@ -101,6 +101,7 @@ export function InvestigationPanel({
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent 
+        showCloseButton={false}
         onInteractOutside={() => onClose()}
         className="max-w-[95vw] w-[1400px] max-h-[95vh] overflow-hidden flex flex-col p-0 gap-0 bg-background border border-border/60 shadow-2xl"
       >
@@ -146,8 +147,8 @@ export function InvestigationPanel({
               </div>
             </div>
             
-            {/* Action Buttons as requested */}
-            <div className="flex flex-wrap items-center gap-2">
+            {/* Action Buttons & Close */}
+            <div className="flex items-center gap-2 flex-wrap">
               <Button onClick={download} variant="outline" size="sm" className="h-8 gap-1.5 bg-secondary/30 text-xs">
                 <FileDown className="h-3.5 w-3.5" /> PDF
               </Button>
@@ -166,6 +167,19 @@ export function InvestigationPanel({
               <Button variant="default" size="sm" className="h-8 gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white">
                 <Network className="h-3.5 w-3.5" /> Graph View
               </Button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onClose();
+                }}
+                className="h-8 w-8 rounded-lg border border-border/80 bg-secondary/60 hover:bg-rose-500/20 hover:border-rose-500/50 hover:text-rose-400 text-muted-foreground transition-all cursor-pointer flex items-center justify-center ml-1 shadow-sm"
+                title="Close"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </div>

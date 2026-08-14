@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Activity, Landmark, Phone, Globe, ShieldAlert,
-  FileDown, Code, ArrowUpDown, Clock, Network, AlertTriangle, FileText
+  FileDown, Code, ArrowUpDown, Clock, Network, AlertTriangle, FileText, X
 } from "lucide-react";
 import { type EventDossier } from "@/lib/api";
 import { toast } from "sonner";
@@ -135,6 +135,7 @@ export function EventDossierPanel({
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent 
+        showCloseButton={false}
         onInteractOutside={() => onClose()}
         className="max-w-[95vw] w-[1200px] max-h-[95vh] overflow-hidden flex flex-col p-0 gap-0 bg-background border border-border/60 shadow-2xl"
       >
@@ -176,14 +177,27 @@ export function EventDossierPanel({
               </div>
             </div>
             
-            {/* Action Buttons */}
-            <div className="flex flex-wrap items-center gap-2">
+            {/* Action Buttons & Close */}
+            <div className="flex items-center gap-2">
               <Button onClick={download} variant="outline" size="sm" className="h-8 gap-1.5 bg-secondary/30 text-xs">
                 <FileDown className="h-3.5 w-3.5" /> PDF
               </Button>
               <Button onClick={downloadJson} variant="outline" size="sm" className="h-8 gap-1.5 bg-secondary/30 text-xs">
                 <Code className="h-3.5 w-3.5" /> JSON
               </Button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onClose();
+                }}
+                className="h-8 w-8 rounded-lg border border-border/80 bg-secondary/60 hover:bg-rose-500/20 hover:border-rose-500/50 hover:text-rose-400 text-muted-foreground transition-all cursor-pointer flex items-center justify-center ml-1 shadow-sm"
+                title="Close"
+                aria-label="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </div>
