@@ -115,11 +115,15 @@ const DEFAULT_API_URL = "http://127.0.0.1:8000";
 
 export function apiBaseUrl(): string {
   if (typeof window === "undefined") {
-    return process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_URL;
+    return process.env.NEXT_PUBLIC_API_URL || process.env.APP_BACKEND_URL || DEFAULT_API_URL;
   }
+  // Client-side: use the same-origin /api proxy (handled by Next.js rewrites in dev, Nginx in prod)
+  // This completely eliminates CORS issues and localhost-in-production bugs.
   const envUrl = process.env.NEXT_PUBLIC_API_URL;
-  if (envUrl) return envUrl.replace(/\/+$/, "");
-  return window.location.origin + "/api";
+  if (envUrl && window.location.hostname === "localhost") {
+      return envUrl.replace(/\/+$/, "");
+  }
+  return "/api";
 }
 
 function bearerToken(): string | null {

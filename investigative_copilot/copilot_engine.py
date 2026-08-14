@@ -192,11 +192,10 @@ class InvestigativeCoPilotEngine:
                 is_factual = True
 
         # 2. Try the live LLM (Groq) whenever a key exists
-        # PERF/LATENCY FIX: Disabled LLM for semantic parsing to avoid latency issues.
-        # Fall back instantly to the deterministic manual parser.
+        # Semantic queries use LLM, but simple queries skip it (is_factual=True).
         llm_response = None
-        # if (self.api_key or self.llm.has_provider()) and not is_factual:
-        #     llm_response = self._call_llm_api(query_clean)
+        if self.llm.has_provider() and not is_factual:
+            llm_response = self._call_llm_api(query_clean)
 
         # 3. If no LLM response or offline mode, run deterministic CoT pipeline
         if not llm_response:

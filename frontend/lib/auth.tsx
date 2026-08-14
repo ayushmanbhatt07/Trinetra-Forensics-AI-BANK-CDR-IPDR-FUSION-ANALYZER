@@ -65,17 +65,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const t = window.localStorage.getItem(TOKEN_KEY);
-    if (!t) return;
+    
+    const handle401 = () => {
+      window.localStorage.removeItem(TOKEN_KEY);
+      window.localStorage.removeItem(USER_KEY);
+      setToken(null);
+      setUser(null);
+      if (typeof window !== "undefined") {
+          window.location.href = "/login";
+      }
+    };
+    window.addEventListener("api:401", handle401);
+
+    if (!t) {
+        setReady(true);
+        return () => window.removeEventListener("api:401", handle401);
+    }
+    
     api
       .me()
       .then((me) => setUser(me.user))
       .catch(() => {
-        window.localStorage.removeItem(TOKEN_KEY);
-        window.localStorage.removeItem(USER_KEY);
-        setToken(null);
-        setUser(null);
+        handle401();
       })
       .finally(() => setReady(true));
+      
+    return () => window.removeEventListener("api:401", handle401);
   }, []);
 
   const login = useCallback(

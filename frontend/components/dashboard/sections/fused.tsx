@@ -56,7 +56,7 @@ export function FusedSection() {
       })
       .catch((error) => {
         const err = error as { status?: number };
-        if (err.status !== 409) {
+        if (err.status !== 409 && err.status !== 425) {
           toast.error("Failed to load fused records. Is the backend running?");
         }
         setRows([]);
@@ -83,10 +83,7 @@ export function FusedSection() {
   }, [fusedKey]);
 
   useEffect(() => {
-    if (!pipelineState) {
-        loadFused();
-        return;
-    }
+    if (!pipelineState) return;
     // PARSING and FUSING: no fused data yet, don't load
     // FUSED_READY and beyond: fused data is available, load immediately
     if (pipelineState.status !== "PARSING" && pipelineState.status !== "FUSING") {

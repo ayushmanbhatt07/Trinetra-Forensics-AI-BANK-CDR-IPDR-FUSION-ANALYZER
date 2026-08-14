@@ -55,11 +55,12 @@ logger = logging.getLogger(__name__)
 _cache: dict = {}
 _CACHE_KEY = "hybrid"
 _cache_lock = threading.Lock()
-
+_computing: dict[str, threading.Event] = {}
 
 def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        _computing.clear()
 
 
 # api-layer convenience alias (clear_hybrid_cache is the documented name)
@@ -79,19 +80,31 @@ def _fetch(bundle: dict) -> dict:
 
     with _cache_lock:
         hit = _cache.get(key)
+        if hit is not None:
+            return hit
+            
+        event = _computing.get(key)
+        if event is None:
+            event = threading.Event()
+            _computing[key] = event
+            is_worker = True
+        else:
+            is_worker = False
 
-    if hit is not None:
-        return hit
-
-    result = _compute(bundle)
-
-    with _cache_lock:
-        existing = _cache.get(key)
-        if existing is not None:
-            return existing
-
-        _cache[key] = result
-        return result
+    if is_worker:
+        try:
+            result = _compute(bundle)
+            with _cache_lock:
+                _cache[key] = result
+            return result
+        finally:
+            with _cache_lock:
+                _computing.pop(key, None)
+            event.set()
+    else:
+        event.wait()
+        with _cache_lock:
+            return _cache.get(key, {})
 
 
 def _compute(bundle: dict) -> dict:
