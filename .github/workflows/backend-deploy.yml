@@ -66,13 +66,18 @@ jobs:
 
       - name: Deploy to Server via SSH
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          envs: GHCR_TOKEN,GHCR_USERNAME
           script: |
             # Authenticate to GHCR on the server to pull the image
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             
             # Identify exact image to deploy
             NEW_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ env.CI_SHORT_SHA }}"
@@ -105,7 +110,7 @@ jobs:
             # Health check loop (wait up to 60 seconds)
             echo "Waiting for container to start..."
             HEALTHY=false
-            for i in {1..12}; do
+            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
               if curl -s -f http://localhost:8000/health > /dev/null; then
                 HEALTHY=true
                 break
@@ -132,7 +137,7 @@ jobs:
                 
                 echo "Waiting for rollback container to start..."
                 ROLLBACK_HEALTHY=false
-                for j in {1..12}; do
+                for j in 1 2 3 4 5 6 7 8 9 10 11 12; do
                   if curl -s -f http://localhost:8000/health > /dev/null; then
                     ROLLBACK_HEALTHY=true
                     break

@@ -60,8 +60,6 @@ For the deployment workflow (`.github/workflows/backend-deploy.yml`) to securely
 *   `SERVER_HOST`: The IP address or domain name of your Ubuntu server.
 *   `SERVER_USER`: The SSH username (e.g., `root`).
 *   `SERVER_SSH_KEY`: The private SSH key allowing access to the server.
-*   `GHCR_USERNAME`: Your GitHub username for the server to pull images.
-*   `GHCR_TOKEN`: A Personal Access Token (PAT) with `read:packages` permission.
 
 ## F. Server Preparation
 
@@ -86,8 +84,8 @@ When a developer pushes to the `main` branch:
 1.  **CI Validation:** The `Backend CI` workflow runs to ensure dependencies install and the app imports correctly.
 2.  **Docker Build & Push:** The `Backend Deploy` workflow builds the Docker image and pushes it to GHCR with `latest` and `sha` tags.
 3.  **SSH Deployment:** The workflow connects to your Ubuntu server via SSH.
-4.  **Update Container:** It pulls the exact commit image (`sha-<commit>`), stops and removes the old `trinetra-backend` container, and starts the new one, mounting `/opt/trinetra/data` to `/app/data`.
-5.  **Health Check & Rollback:** It polls `http://localhost:8000/health` for up to 60 seconds. If it fails, the new container is removed and the previous container image is automatically restored to ensure zero prolonged downtime.
+4.  **Update Container:** It pulls the latest image, stops and removes the old `trinetra-backend` container, and starts the new one, mounting `/opt/trinetra/data` to `/app/data`.
+5.  **Health Check:** It waits 5 seconds and performs a health check against `http://localhost:8000/health`. If it fails, the deployment fails.
 
 ## H. Rollback
 
@@ -102,7 +100,13 @@ Because images are tagged by commit SHA, rollback is straightforward:
     ```
 4.  Start the previous image:
     ```bash
-    docker run -d --name trinetra-backend --restart unless-stopped -p 8000:8000 -v /opt/trinetra/data:/app/data --env-file /opt/trinetra/.env ghcr.io/<owner>/<repository>-backend:sha-old123
+   docker run -d \
+  --name trinetra-backend \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -v /opt/trinetra/data:/app/data \
+  --env-file /opt/trinetra/.env \
+  ghcr.io/ayushmanbhatt07/trinetra-forensiq-ai-bank-cdr-ipdr-fusion-analyzer-backend:sha-old123
     ```
 5.  Verify health:
     ```bash

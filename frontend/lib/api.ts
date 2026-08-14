@@ -111,7 +111,7 @@ export interface PipelineStatus {
  *   3. http://localhost:8000 (local dev fallback)
  */
 
-const DEFAULT_API_URL = "http://localhost:8000";
+const DEFAULT_API_URL = "http://127.0.0.1:8000";
 
 export function apiBaseUrl(): string {
   if (typeof window === "undefined") {
