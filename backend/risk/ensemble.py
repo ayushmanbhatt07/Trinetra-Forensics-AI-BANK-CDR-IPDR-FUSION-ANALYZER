@@ -27,6 +27,7 @@ import logging
 from typing import Optional
 
 import numpy as np
+import time
 
 from .features import ACCOUNT_FEATURES, account_features, _safe_log1p
 
@@ -68,24 +69,32 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _isolation_forest():
+        t0 = time.time()
+        logger.info("[ANOMALY] IsolationForest started")
         from sklearn.ensemble import IsolationForest
         forest = IsolationForest(n_estimators=100, contamination=0.1,
                                  random_state=42, n_jobs=1)
         pred = forest.fit_predict(X)
         raw = -forest.score_samples(X)
         raw[pred == 1] = 0.0
+        logger.info(f"[ANOMALY] IsolationForest finished: {time.time() - t0:.2f}s")
         return "isolation_forest", _rank_normalise(raw)
 
     def _lof():
+        t0 = time.time()
+        logger.info("[ANOMALY] LOF started")
         from sklearn.neighbors import LocalOutlierFactor
         lof = LocalOutlierFactor(n_neighbors=min(20, max(2, n - 1)),
-                                 contamination=0.1, novelty=False)
+                                 contamination=0.1, novelty=False, n_jobs=1)
         lof.fit_predict(X)
+        logger.info(f"[ANOMALY] LOF finished: {time.time() - t0:.2f}s")
         return "lof", _rank_normalise(-lof.negative_outlier_factor_)
 
     def _dbscan():
+        t0 = time.time()
+        logger.info("[ANOMALY] DBSCAN started")
         from sklearn.cluster import DBSCAN
-        db = DBSCAN(eps=1.5, min_samples=5).fit(X)
+        db = DBSCAN(eps=1.5, min_samples=5, n_jobs=1).fit(X)
         labels = db.labels_
         core = db.core_sample_indices_
         raw_db = np.zeros(n)
@@ -95,23 +104,29 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
                 d[i] = np.inf
                 nbr = d[core].min() if len(core) else d.min()
                 raw_db[i] = max(0.0, 3.0 - float(nbr))
+        logger.info(f"[ANOMALY] DBSCAN finished: {time.time() - t0:.2f}s")
         return "dbscan", _rank_normalise(raw_db)
 
     def _hdbscan():
+        t0 = time.time()
+        logger.info("[ANOMALY] HDBSCAN started")
         try:
             import hdbscan
             hd = hdbscan.HDBSCAN(min_cluster_size=min(10, max(3, n // 20)),
-                                 prediction_data=True)
+                                 prediction_data=True, core_dist_n_jobs=1)
             hd.fit(X)
             raw_hd = getattr(hd, "outlier_scores_", np.zeros(n))
             if raw_hd is None or len(raw_hd) != n:
                 raw_hd = np.zeros(n)
+            logger.info(f"[ANOMALY] HDBSCAN finished: {time.time() - t0:.2f}s")
             return "hdbscan", _rank_normalise(raw_hd)
         except Exception as exc:
             logger.warning("hdbscan unavailable: %s", exc)
             return None
 
     def _ocsvm():
+        t0 = time.time()
+        logger.info("[ANOMALY] OneClassSVM started")
         from sklearn.svm import OneClassSVM
         # Subsample for SVM to avoid O(n^2) quadratic blowup on large datasets
         max_svm = 2000
@@ -122,26 +137,34 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
             X_sub = X
         svm = OneClassSVM(nu=0.1, kernel="rbf", gamma="scale")
         svm.fit(X_sub)
+        logger.info(f"[ANOMALY] OneClassSVM finished: {time.time() - t0:.2f}s")
         return "one_class_svm", _rank_normalise(-svm.decision_function(X))
 
     def _pca():
+        t0 = time.time()
+        logger.info("[ANOMALY] PCA started")
         try:
             from sklearn.decomposition import PCA
             k = min(12, max(2, X.shape[1] - 1), n - 1)
             pca = PCA(n_components=k)
             proj = pca.fit_transform(X)
             recon = pca.inverse_transform(proj)
+            logger.info(f"[ANOMALY] PCA finished: {time.time() - t0:.2f}s")
             return "pca", _rank_normalise(np.linalg.norm(X - recon, axis=1))
         except Exception as exc:
             logger.warning("pca unavailable: %s", exc)
             return None
 
     def _zscore():
+        t0 = time.time()
+        logger.info("[ANOMALY] ZScore started")
         z = np.abs((X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9))
+        logger.info(f"[ANOMALY] ZScore finished: {time.time() - t0:.2f}s")
         return "zscore", _rank_normalise(z.max(axis=1))
 
     detectors = [_isolation_forest, _lof, _dbscan, _hdbscan, _ocsvm, _pca, _zscore]
-    with ThreadPoolExecutor(max_workers=len(detectors)) as ex:
+    # Bound max_workers to 2 to prevent severe CPU starvation on 2-4 vCPU instances
+    with ThreadPoolExecutor(max_workers=2) as ex:
         futures = [ex.submit(fn) for fn in detectors]
         for future in as_completed(futures):
             result = future.result()

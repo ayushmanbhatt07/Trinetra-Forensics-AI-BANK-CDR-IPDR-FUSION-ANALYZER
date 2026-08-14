@@ -10,6 +10,14 @@ from __future__ import annotations
 import csv
 import io
 import os
+
+# Prevent native libraries from spawning runaway threads when running inside ThreadPoolExecutor.
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import tempfile
 import threading
 from contextlib import asynccontextmanager
@@ -65,7 +73,7 @@ app.add_middleware(
 app.include_router(copilot_router.router)
 # Force reload for copilot and cache locks
 _state: dict = {}
-_pipeline: dict = {"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None}
+_pipeline: dict = {"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None, "error": None}
 _lock = threading.Lock()
 
 
@@ -195,7 +203,7 @@ def ingest_clear(user: dict = Depends(auth.require_user)):
     """Drop the loaded bundle (and its persisted copy)."""
     with _lock:
         _state.pop("bundle", None)
-        _pipeline.update({"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None})
+        _pipeline.update({"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None, "error": None})
     copilot_router.reset_engine()
     risk.clear_cache()
     risk.clear_hybrid_cache()
@@ -489,9 +497,11 @@ def _run_pipeline_background(bundle: dict) -> None:
             
             _state["hybrid_warm"] = True
             _log.info("hybrid engine warmed (%d txns)", len(bundle.get("bank", [])))
-        except Exception:
+        except Exception as exc:
             _state["hybrid_warm"] = False
             _pipeline["status"] = "ERROR"
+            _pipeline["ready"] = False
+            _pipeline["error"] = str(exc)
             _log.exception("hybrid engine warm-up failed")
 
     t = threading.Thread(target=_run, daemon=True)
@@ -515,6 +525,8 @@ def hybrid_transactions(min_score: float = Query(0, ge=0, le=100),
                         user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     scored = risk.hybrid_transaction_risk(b)
+    if scored is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     bank_by_id = {r.get("txn_id"): r for r in b.get("bank", [])}
     results = []
     for s in scored:
@@ -548,7 +560,10 @@ def hybrid_accounts(min_score: float = Query(0, ge=0, le=100),
                     limit: int = Query(50, le=500),
                     user: dict = Depends(auth.require_user)):
     b = _require_bundle()
-    accounts = [a for a in risk.hybrid_account_risk(b)
+    res = risk.hybrid_account_risk(b)
+    if res is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
+    accounts = [a for a in res
                 if a["risk_score"] >= min_score][:limit]
     return {"accounts": accounts, "total": len(accounts)}
 
@@ -558,7 +573,10 @@ def hybrid_entities(min_score: float = Query(0, ge=0, le=100),
                     limit: int = Query(50, le=500),
                     user: dict = Depends(auth.require_user)):
     b = _require_bundle()
-    entities = [e for e in risk.hybrid_entity_risk(b)
+    res = risk.hybrid_entity_risk(b)
+    if res is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
+    entities = [e for e in res
                 if e["risk_score"] >= min_score][:limit]
     return {"entities": entities, "total": len(entities)}
 
@@ -567,7 +585,9 @@ def hybrid_entities(min_score: float = Query(0, ge=0, le=100),
 def hybrid_scenarios(limit: int = Query(20, le=100),
                      user: dict = Depends(auth.require_user)):
     b = _require_bundle()
-    res = risk.hybrid_analyze(b)
+    res = risk.hybrid_analyze(b, block=False)
+    if res is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     scen = res["scenarios"]
     return {"stats": scen["stats"],
             "moneyflow": scen["moneyflow"]["stats"],
@@ -578,7 +598,9 @@ def hybrid_scenarios(limit: int = Query(20, le=100),
 @app.get("/hybrid/stats")
 def hybrid_stats(user: dict = Depends(auth.require_user)):
     b = _require_bundle()
-    res = risk.hybrid_analyze(b)
+    res = risk.hybrid_analyze(b, block=False)
+    if res is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     return {"stats": res["stats"],
             "scenarios": res["scenarios"]["stats"],
             "weights": risk.hybrid_weights()}
@@ -589,6 +611,8 @@ def hybrid_explain_transaction(transaction_id: str,
                                user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     out = risk.explanations_for_txn(b, transaction_id)
+    if out is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     if not out:
         raise HTTPException(404, "transaction not found")
     return {"explanation": out}
@@ -599,6 +623,8 @@ def hybrid_explain_account(account_no: str,
                            user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     out = risk.explanations_for_account(b, account_no)
+    if out is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     if not out:
         raise HTTPException(404, "account not found")
     return {"explanation": out}
@@ -609,6 +635,8 @@ def hybrid_explain_entity(kind: str, entity: str,
                           user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     out = risk.explanations_for_entity(b, kind, entity)
+    if out is None:
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     if not out:
         raise HTTPException(404, "entity not found")
     return {"explanation": out}

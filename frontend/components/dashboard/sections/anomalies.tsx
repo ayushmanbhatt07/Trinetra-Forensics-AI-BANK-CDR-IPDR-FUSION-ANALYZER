@@ -60,10 +60,14 @@ export function AnomaliesSection() {
           setAlerts(res.results || []);
           setAlertsLoading(false);
         })
-        .catch((error) => {
+        .catch((error: any) => {
           if (!mounted) return;
-          toast.error("Failed to load anomaly alerts. Is the backend running?");
-          setAlertsLoading(false);
+          if (error?.status === 425) {
+            timeoutId = window.setTimeout(checkPipeline, 2000);
+          } else {
+            toast.error("Failed to load anomaly alerts. Is the backend running?");
+            setAlertsLoading(false);
+          }
         });
     };
 
@@ -73,14 +77,17 @@ export function AnomaliesSection() {
         if (!mounted) return;
         setPipelineState(ps);
         
-        if (ps && !ps.ready) {
+        if (ps && ps.status === "ERROR") {
+           toast.error(`Anomaly pipeline failed: ${ps.error || "Unknown error"}`);
+           setAlertsLoading(false);
+        } else if (ps && !ps.ready) {
            timeoutId = window.setTimeout(checkPipeline, 1000);
         } else {
            fetchAlerts();
         }
       } catch (e) {
         if (!mounted) return;
-        fetchAlerts();
+        timeoutId = window.setTimeout(checkPipeline, 3000);
       }
     };
     

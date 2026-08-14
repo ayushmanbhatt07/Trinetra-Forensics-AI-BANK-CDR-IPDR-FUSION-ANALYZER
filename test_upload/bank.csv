@@ -1,0 +1,2 @@
+txn_id,account_no,ts,credit,debit,mode
+T1,A1,1000,100,0,UPI

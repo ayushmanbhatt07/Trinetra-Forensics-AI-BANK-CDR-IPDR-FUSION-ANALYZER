@@ -75,7 +75,7 @@ def _fingerprint(bundle: dict) -> tuple:
             tuple((r.get("txn_id") or "")[:8] for r in bank[:5]))
 
 
-def _fetch(bundle: dict) -> dict:
+def _fetch(bundle: dict, block: bool = True) -> dict | None:
     key = _CACHE_KEY + ":" + repr(_fingerprint(bundle))
 
     with _cache_lock:
@@ -85,6 +85,8 @@ def _fetch(bundle: dict) -> dict:
             
         event = _computing.get(key)
         if event is None:
+            if not block:
+                return None
             event = threading.Event()
             _computing[key] = event
             is_worker = True
@@ -102,6 +104,8 @@ def _fetch(bundle: dict) -> dict:
                 _computing.pop(key, None)
             event.set()
     else:
+        if not block:
+            return None
         event.wait()
         with _cache_lock:
             return _cache.get(key, {})
@@ -335,9 +339,9 @@ def _phone_internet(internet: dict, kind: str, entity_id: str) -> float:
     return float(hit.get("shared_ip_score", 0.0))
 
 
-def hybrid_analyze(bundle: dict) -> dict:
+def hybrid_analyze(bundle: dict, block: bool = True) -> dict | None:
     """Top-level entry point (cached)."""
-    return _fetch(bundle)
+    return _fetch(bundle, block=block)
 
 
 def hybrid_analyze_fast(bundle: dict) -> dict | None:
@@ -346,28 +350,36 @@ def hybrid_analyze_fast(bundle: dict) -> dict | None:
     return _cache.get(key)
 
 
-def hybrid_transaction_risk(bundle: dict, min_score: float = 0.0) -> list[dict]:
+def hybrid_transaction_risk(bundle: dict, min_score: float = 0.0) -> list[dict] | None:
     """Hybrid per-transaction risk, sorted descending (cache-aware)."""
-    res = _fetch(bundle)
+    res = _fetch(bundle, block=False)
+    if res is None:
+        return None
     rows = res["transactions_sorted"]
     if min_score > 0:
         rows = [r for r in rows if r["risk_score"] >= min_score]
     return rows
 
 
-def hybrid_account_risk(bundle: dict) -> list[dict]:
-    res = _fetch(bundle)
+def hybrid_account_risk(bundle: dict) -> list[dict] | None:
+    res = _fetch(bundle, block=False)
+    if res is None:
+        return None
     return res["accounts_sorted"]
 
 
-def hybrid_entity_risk(bundle: dict) -> list[dict]:
-    res = _fetch(bundle)
+def hybrid_entity_risk(bundle: dict) -> list[dict] | None:
+    res = _fetch(bundle, block=False)
+    if res is None:
+        return None
     return res["entities_sorted"]
 
 
-def explanations_for_txn(bundle: dict, txn_id: str) -> dict:
+def explanations_for_txn(bundle: dict, txn_id: str) -> dict | None:
     """Full explainability payload for one transaction."""
-    res = _fetch(bundle)
+    res = _fetch(bundle, block=False)
+    if res is None:
+        return None
     txn = res["transactions"].get(txn_id)
     if txn is None:
         return {}
@@ -388,8 +400,10 @@ def explanations_for_txn(bundle: dict, txn_id: str) -> dict:
     return explain_transaction(txn_id, txn, info)
 
 
-def explanations_for_account(bundle: dict, account_no: str) -> dict:
-    res = _fetch(bundle)
+def explanations_for_account(bundle: dict, account_no: str) -> dict | None:
+    res = _fetch(bundle, block=False)
+    if res is None:
+        return None
     acc = res["accounts"].get(account_no)
     if acc is None:
         return {}
@@ -405,8 +419,10 @@ def explanations_for_account(bundle: dict, account_no: str) -> dict:
     return explain_account(account_no, info)
 
 
-def explanations_for_entity(bundle: dict, kind: str, entity: str) -> dict:
-    res = _fetch(bundle)
+def explanations_for_entity(bundle: dict, kind: str, entity: str) -> dict | None:
+    res = _fetch(bundle, block=False)
+    if res is None:
+        return None
     ent = res["entities"].get(f"{kind}:{entity}")
     if ent is None:
         return {}
