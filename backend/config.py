@@ -46,6 +46,7 @@ DEFAULTS = {
     "DETECT_MIN_CONFIDENCE": "0.55",
     "ANOMALY_CONTAMINATION": "0.05",
     "MAX_UPLOAD_FILES": "50",
+    "CLEAR_ON_STARTUP": "1",
 }
 
 
@@ -126,6 +127,10 @@ def anomaly_contamination() -> float:
 
 def max_upload_files() -> int:
     return max(1, _int("MAX_UPLOAD_FILES", 50))
+
+
+def clear_on_startup() -> bool:
+    return _get("CLEAR_ON_STARTUP", "1").lower() in ("1", "true", "yes", "on")
 
 
 def groq_api_keys() -> list[str]:

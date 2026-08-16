@@ -98,7 +98,11 @@ export interface PipelineStatus {
   status: string;
   progress: number;
   ready: boolean;
+  fused_ready?: boolean;
+  anomalies_ready?: boolean;
+  graphs_ready?: boolean;
   dataset_id: string | null;
+  job_id?: string | null;
   error?: string | null;
 }
 
@@ -112,24 +116,20 @@ export interface PipelineStatus {
  *   3. http://localhost:8000 (local dev fallback)
  */
 
-const DEFAULT_API_URL = "http://127.0.0.1:8000";
+const DEFAULT_API_URL = "http://localhost:8000";
 
 export function apiBaseUrl(): string {
   if (typeof window === "undefined") {
-    return process.env.NEXT_PUBLIC_API_URL || process.env.APP_BACKEND_URL || DEFAULT_API_URL;
+    return process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_URL;
   }
-  // Client-side: use the same-origin /api proxy (handled by Next.js rewrites in dev, Nginx in prod)
-  // This completely eliminates CORS issues and localhost-in-production bugs.
   const envUrl = process.env.NEXT_PUBLIC_API_URL;
-  if (envUrl && window.location.hostname === "localhost") {
-      return envUrl.replace(/\/+$/, "");
-  }
-  return "/api";
+  if (envUrl) return envUrl.replace(/\/+$/, "");
+  return window.location.origin + "/api";
 }
 
 function bearerToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem("backend_token");
+  return window.sessionStorage.getItem("backend_token") || window.localStorage.getItem("backend_token");
 }
 
 export class ApiError extends Error {
@@ -140,6 +140,18 @@ export class ApiError extends Error {
   }
 }
 
+export function isPipelineNotReady(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 425;
+}
+
+export function isNoDataLoaded(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 409;
+}
+
+export function isNetworkOrWarmupError(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 0 || err.status === 503);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {};
   const token = bearerToken();
@@ -147,24 +159,40 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!(init?.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
-  const res = await fetch(apiBaseUrl() + path, { ...init, headers });
-  if (!res.ok) {
-    if (res.status === 409) {
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("api:409"));
+  try {
+    const res = await fetch(apiBaseUrl() + path, { ...init, headers });
+    if (!res.ok) {
+      if (res.status === 401) {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("api:401"));
+        }
+      } else if (res.status === 409 && (path === "/summary" || path === "/data/fused")) {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("api:409"));
+        }
       }
+
+      let detail = `HTTP ${res.status}`;
+      try {
+        const body = await res.json();
+        detail = body.detail || detail;
+      } catch {
+        /* keep default */
+      }
+      throw new ApiError(res.status, detail);
     }
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body.detail || detail;
-    } catch {
-      /* keep default */
+    return (await res.json()) as T;
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    const msg = err instanceof Error ? err.message : "";
+    if (!msg || msg.toLowerCase().includes("failed to fetch") || msg.toLowerCase().includes("networkerror")) {
+      throw new ApiError(0, "Backend unreachable. If the server was sleeping (Render cold-start), please wait 15 seconds and retry.");
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(0, msg);
   }
-  return (await res.json()) as T;
 }
+
+
 
 export interface IngestStatus {
   loaded: boolean;
@@ -753,10 +781,11 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   register: (username: string, password: string) =>
-    request<{ detail: string; user: { username: string; role: string } }>("/auth/register", {
+    request<AuthResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+
   me: () => request<{ user: { username: string; role: string } }>("/auth/me"),
   health: () => request<{ status: string; loaded: boolean; last_ingested: string | null }>("/health"),
   status: () => request<IngestStatus>("/ingest/status"),
@@ -826,20 +855,32 @@ export const api = {
       `STR_${kind}_${value.replace(/[^a-zA-Z0-9]/g, "_").slice(0, 32)}.pdf`
     );
   },
-  fused: (offset = 0, limit = 25, q = "", account = "", mode = "", riskAnnotate = false) => {
-    const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
-    if (q) params.set("q", q);
-    if (account) params.set("account", account);
-    if (mode && mode !== "all") params.set("mode", mode);
-    if (riskAnnotate) params.set("risk_annotate", "1");
+  fused: (offset = 0, limit = 25, q = "", account = "", mode = "", riskAnnotate = false,
+          dateStart = "", dateEnd = "", minAmount = 0.0, maxAmount = 0.0, riskBand = "") => {
+    const params = new URLSearchParams({
+      offset: offset.toString(),
+      limit: limit.toString(),
+      q, account, mode,
+      risk_annotate: riskAnnotate ? "1" : "0",
+      date_start: dateStart,
+      date_end: dateEnd,
+      min_amount: minAmount.toString(),
+      max_amount: maxAmount.toString(),
+      risk_band: riskBand
+    });
     return request<FusedPage>(`/data/fused?${params.toString()}`);
   },
 
-  fusedCsv: async (q = "", account = "", mode = ""): Promise<void> => {
+  fusedCsv: async (q = "", account = "", mode = "", dateStart = "", dateEnd = "", minAmount = 0.0, maxAmount = 0.0, riskBand = ""): Promise<void> => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
     if (account) params.set("account", account);
     if (mode && mode !== "all") params.set("mode", mode);
+    if (dateStart) params.set("date_start", dateStart);
+    if (dateEnd) params.set("date_end", dateEnd);
+    if (minAmount > 0) params.set("min_amount", minAmount.toString());
+    if (maxAmount > 0) params.set("max_amount", maxAmount.toString());
+    if (riskBand) params.set("risk_band", riskBand);
     const token = bearerToken();
     const res = await fetch(
       apiBaseUrl() + `/data/fused.csv?${params.toString()}`,
@@ -897,8 +938,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  copilotEntityDetails: (entityId: string) =>
-    request<any>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/details`),
+  copilotEntityDetails: (entityId: string, includeAudit = false) =>
+    request<any>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/details?include_audit=${includeAudit}`),
+  copilotEntityAudit: (entityId: string) =>
+    request<{ entity_id: string; audit_report: string }>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/audit`),
   copilotLlmTree: (entityId: string, maxHops = 3) =>
     request<LlmTreeResult>("/api/v1/copilot/llm-tree", {
       method: "POST",

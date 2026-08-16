@@ -3,6 +3,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional, Union, List, Dict, Any, Tuple
 import logging
+import bisect
 
 logger = logging.getLogger(__name__)
 
@@ -291,10 +292,16 @@ class CopilotDBBuilder:
                        window: int) -> List[list]:
         cdr_by_phone: dict[str, list[dict]] = {}
         for c in cdr:
-            if not c.get("cdr_id"):
+            if not c.get("cdr_id") or c.get("ts") is None:
                 continue
             for p in _cdr_party_phones(c):
                 cdr_by_phone.setdefault(p, []).append(c)
+                
+        cdr_indexed: dict[str, tuple[list[float], list[dict]]] = {}
+        for p, clist in cdr_by_phone.items():
+            clist.sort(key=lambda x: x["ts"])
+            cdr_indexed[p] = ([x["ts"] for x in clist], clist)
+            
         best: dict[tuple, float] = {}
         for r in bank:
             phones = {_norm_phone(r.get("receiver_phone")),
@@ -305,11 +312,14 @@ class CopilotDBBuilder:
             if txn_ts is None or not txn_id:
                 continue
             for ph in phones:
-                for c in cdr_by_phone.get(ph, ()):
-                    cts = c.get("ts")
-                    if cts is None or abs(txn_ts - cts) > window:
-                        continue
-                    key = (str(txn_id), str(c.get("cdr_id")))
+                if ph not in cdr_indexed:
+                    continue
+                k_ts, c_list = cdr_indexed[ph]
+                idx_start = bisect.bisect_left(k_ts, txn_ts - window)
+                idx_end = bisect.bisect_right(k_ts, txn_ts + window)
+                for c in c_list[idx_start:idx_end]:
+                    cts = c["ts"]
+                    key = (str(txn_id), str(c["cdr_id"]))
                     delta = abs(cts - txn_ts)
                     if key not in best or delta < best[key]:
                         best[key] = delta
@@ -328,33 +338,36 @@ class CopilotDBBuilder:
             return out
 
         cdr_by_key: dict[str, list[dict]] = {}
-        cdr_by_id: dict[str, dict] = {}
         for c in cdr:
-            if not c.get("cdr_id"):
+            if not c.get("cdr_id") or c.get("ts") is None:
                 continue
-            cdr_by_id[str(c["cdr_id"])] = c
             for k in keys(c, ("imsi", "imei")):
                 cdr_by_key.setdefault(k, []).append(c)
+                
+        cdr_indexed: dict[str, tuple[list[float], list[dict]]] = {}
+        for k, clist in cdr_by_key.items():
+            clist.sort(key=lambda x: x["ts"])
+            cdr_indexed[k] = ([x["ts"] for x in clist], clist)
+            
         rows = []
         for i in ipdr:
             ipdr_id = i.get("ipdr_id")
-            if not ipdr_id:
-                continue
-            matched: set[str] = set()
-            for k in keys(i, ("imsi", "imei", "msisdn")):
-                matched.update(c.get("cdr_id") for c in cdr_by_key.get(k, ()))
             its = i.get("start_ts")
-            for cdr_id in matched:
-                c = cdr_by_id.get(str(cdr_id))
-                if c is None:
+            if not ipdr_id or its is None:
+                continue
+                
+            for k in keys(i, ("imsi", "imei", "msisdn")):
+                if k not in cdr_indexed:
                     continue
-                cts = c.get("ts")
-                if cts is None or its is None or abs(cts - its) > window:
-                    continue
-                rows.append([
-                    str(cdr_id), str(ipdr_id),
-                    "cdr_ipdr_correlation", float(cts - its), 1,
-                ])
+                k_ts, c_list = cdr_indexed[k]
+                idx_start = bisect.bisect_left(k_ts, its - window)
+                idx_end = bisect.bisect_right(k_ts, its + window)
+                for c in c_list[idx_start:idx_end]:
+                    cts = c["ts"]
+                    rows.append([
+                        str(c["cdr_id"]), str(ipdr_id),
+                        "cdr_ipdr_correlation", float(abs(cts - its)), 1,
+                    ])
         return rows
 
     # ------------------------------------------------------------ schema

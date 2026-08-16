@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -12,13 +11,13 @@ import {
   RotateCw,
   Crosshair,
   Smartphone,
-  Globe,
   Filter,
 } from "lucide-react";
 import { api, type EgoNet, type Phone as PhoneProfile, type MoneyGraph, type EntityIntelligence, type DossierIntelligence, type RelationshipIntel } from "@/lib/api";
 import { toast } from "sonner";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
 import { RadialIntro, type OrbitItem } from "@/components/ui/radial-intro";
+import { usePipeline } from "@/lib/pipeline-context";
 
 type Tab = "calls" | "money" | "link" | "coincidence";
 type PanelPayload =
@@ -63,7 +62,7 @@ const riskColor = (risk?: number) => {
   return "#34d399";
 };
 
-function GraphNode({
+const GraphNode = React.memo(function GraphNode({
   x,
   y,
   r,
@@ -87,28 +86,26 @@ function GraphNode({
     : kind === "phone" ? "oklch(0.25 0.02 260)"
     : "oklch(0.28 0.03 260)";
   const stroke = kind === "phone" && risk !== undefined ? riskColor(risk) : "oklch(0.7 0.18 145)";
+
   return (
-    <motion.g 
+    <g 
+      transform={`translate(${x}, ${y})`}
       onClick={onClick} 
-      className="cursor-pointer" 
+      className="cursor-pointer transition-transform duration-200 hover:scale-110" 
       role="button" 
       aria-label={`Inspect ${id}`}
-      initial={{ opacity: 0, scale: 0.8 }}
-      animate={{ opacity: 1, scale: 1, x, y }}
-      exit={{ opacity: 0, scale: 0.5 }}
-      transition={{ type: "spring", stiffness: 200, damping: 20 }}
     >
       <circle cx={0} cy={0} r={r + 6} fill="transparent" />
       <circle cx={0} cy={0} r={r} fill={fill} stroke={stroke} strokeWidth={2} />
-      <text x={0} y={3} textAnchor="middle" fontSize="9" fill="oklch(0.95 0 0)" className="font-mono pointer-events-none">
+      <text x={0} y={3} textAnchor="middle" fontSize="9" fill="oklch(0.95 0 0)" className="font-mono pointer-events-none select-none">
         {id.length > 11 ? `${id.slice(0, 11)}…` : id}
       </text>
       <title>{`${id} · ${kind ?? "node"}${risk !== undefined ? ` · risk ${risk}/100` : ""} — click to inspect`}</title>
-    </motion.g>
+    </g>
   );
-}
+});
 
-function GraphEdge({
+const GraphEdge = React.memo(function GraphEdge({
   x1,
   y1,
   x2,
@@ -130,24 +127,21 @@ function GraphEdge({
   hint?: string;
 }) {
   return (
-    <motion.g
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.4 }}
-    >
-      <motion.line
-        initial={{ x1, y1, x2, y2 }}
-        animate={{ x1, y1, x2, y2 }}
-        transition={{ type: "spring", stiffness: 100, damping: 20 }}
+    <g className="transition-opacity duration-200 hover:opacity-100">
+      <line
+        x1={x1}
+        y1={y1}
+        x2={x2}
+        y2={y2}
         stroke={color}
         strokeOpacity={opacity}
         strokeWidth={width}
       />
-      <motion.line
-        initial={{ x1, y1, x2, y2 }}
-        animate={{ x1, y1, x2, y2 }}
-        transition={{ type: "spring", stiffness: 100, damping: 20 }}
+      <line
+        x1={x1}
+        y1={y1}
+        x2={x2}
+        y2={y2}
         stroke="transparent"
         strokeWidth={Math.max(10, width + 6)}
         onClick={onClick}
@@ -155,12 +149,12 @@ function GraphEdge({
         style={{ pointerEvents: "stroke" }}
       >
         <title>{hint ?? "Click to inspect this relationship"}</title>
-      </motion.line>
-    </motion.g>
+      </line>
+    </g>
   );
-}
+});
 
-function CallGraphView({
+const CallGraphView = React.memo(function CallGraphView({
   graph,
   onNodeClick,
   onEdgeClick,
@@ -218,65 +212,9 @@ function CallGraphView({
       })}
     </svg>
   );
-}
+});
 
-function LayerGraphView({
-  graph,
-  onNodeClick,
-  onEdgeClick,
-  size = 560,
-}: {
-  graph: EgoNet;
-  onNodeClick: (id: string, kind?: string) => void;
-  onEdgeClick: (a: string, b: string) => void;
-  size?: number;
-}) {
-  const nodes = graph.nodes;
-  const center = graph.node;
-  const positions: Record<string, { x: number; y: number }> = { [center]: { x: 0, y: 0 } };
-  nodes.forEach((node, i) => {
-    const angle = (i / Math.max(nodes.length, 1)) * 2 * Math.PI;
-    positions[node.id] = { x: Math.cos(angle) * 160, y: Math.sin(angle) * 160 };
-  });
-  return (
-    <svg viewBox={`${-size / 2} ${-size / 2} ${size} ${size}`} className="w-full max-h-[560px]">
-      {graph.edges.map((e, i) => {
-        const p1 = positions[e.source];
-        const p2 = positions[e.target];
-        if (!p1 || !p2) return null;
-        const shared = e.kind === "shared";
-        return (
-          <GraphEdge
-            key={i}
-            x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
-            color={shared ? "oklch(0.6 0.15 240)" : "oklch(0.6 0.2 145)"}
-            opacity={0.55}
-            width={Math.min(5, 1 + e.weight / 3)}
-            onClick={() => onEdgeClick(e.source, e.target)}
-            hint={e.evidence?.[0] ?? "relationship"}
-          />
-        );
-      })}
-      <GraphNode x={0} y={0} r={12} id={center} kind="phone" onClick={() => onNodeClick(center, "phone")} />
-      {nodes.map((node) => {
-        const p = positions[node.id];
-        if (!p) return null;
-        return (
-          <GraphNode
-            key={node.id}
-            x={p.x} y={p.y} r={9}
-            id={node.id}
-            kind={node.kind}
-            risk={node.risk}
-            onClick={() => onNodeClick(node.id, node.kind)}
-          />
-        );
-      })}
-    </svg>
-  );
-}
-
-function MoneyGraphView({
+const MoneyGraphView = React.memo(function MoneyGraphView({
   graph,
   onNodeClick,
   onEdgeClick,
@@ -330,9 +268,9 @@ function MoneyGraphView({
       })}
     </svg>
   );
-}
+});
 
-function LinkGraphView({
+const LinkGraphView = React.memo(function LinkGraphView({
   graph,
   onNodeClick,
   onEdgeClick,
@@ -386,11 +324,12 @@ function LinkGraphView({
       })}
     </svg>
   );
-}
+});
 
 const fmtMoney = (n: number) => "Rs " + Math.round(n).toLocaleString("en-IN");
 
-export function NetworkSection() {
+export const NetworkSection = React.memo(function NetworkSection() {
+  const { isGraphReady, pipeline } = usePipeline();
   const [tab, setTab] = useState<Tab>("calls");
   const [phones, setPhones] = useState<PhoneProfile[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -398,7 +337,7 @@ export function NetworkSection() {
   const [graph, setGraph] = useState<EgoNet | null>(null);
   const [moneyGraph, setMoneyGraph] = useState<MoneyGraph | null>(null);
   const [linkGraph, setLinkGraph] = useState<MoneyGraph | null>(null);
-      const [hits, setHits] = useState<{ phone: string; account_no: string; txn_date: string; mode: string; amount: number; phone_cdr_records: number; window_count: number }[]>([]);
+  const [hits, setHits] = useState<{ phone: string; account_no: string; txn_date: string; mode: string; amount: number; phone_cdr_records: number; window_count: number }[]>([]);
   const [loading, setLoading] = useState(true);
   const [panel, setPanel] = useState<PanelPayload | null>(null);
   const [panelBusy, setPanelBusy] = useState(false);
@@ -406,14 +345,22 @@ export function NetworkSection() {
   const [cycleVisible, setCycleVisible] = useState(false);
   const [cycleReplay, setCycleReplay] = useState(0);
 
-  // auto-dismiss the radial intro after a few seconds
+  // In-memory client cache for graph views (0ms instant tab switching)
+  const networkCacheRef = useRef<Map<string, any>>(new Map());
+
+  // Clear cache if active dataset changes
+  useEffect(() => {
+    networkCacheRef.current.clear();
+  }, [pipeline?.dataset_id]);
+
+  // Auto-dismiss the radial intro after a few seconds
   useEffect(() => {
     if (!cycleVisible) return;
     const t = window.setTimeout(() => setCycleVisible(false), 7000);
     return () => window.clearTimeout(t);
   }, [cycleVisible, cycleReplay]);
 
-  const revealCycle = (g: MoneyGraph) => {
+  const revealCycle = useCallback((g: MoneyGraph) => {
     const cycle = findCycle(g);
     if (cycle.length === 0) return;
     setCycleItems(
@@ -425,7 +372,7 @@ export function NetworkSection() {
     );
     setCycleReplay((k) => k + 1);
     setCycleVisible(true);
-  };
+  }, []);
 
   const openEntity = useCallback((kind: string, value: string) => {
     if (!value) return;
@@ -454,63 +401,101 @@ export function NetworkSection() {
   }, []);
 
   const loadTab = useCallback(
-    (t: Tab, phone?: string) => {
+    (t: Tab, phone?: string, graphMode?: "evidence" | "full") => {
+      const activeMode = graphMode || mode;
+      const cacheKey = `${t}:${phone || "all"}:${activeMode}`;
+      if (networkCacheRef.current.has(cacheKey)) {
+        const cached = networkCacheRef.current.get(cacheKey);
+        if (t === "calls") setGraph(cached);
+        else if (t === "money") { setMoneyGraph(cached); revealCycle(cached); }
+        else if (t === "link") setLinkGraph(cached);
+        else if (t === "coincidence") setHits(cached);
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       const loaders: Record<Tab, () => Promise<unknown>> = {
         calls: () =>
           phone
-            ? api.egonet(phone, 1, mode).then((g) => setGraph(g))
+            ? api.egonet(phone, 1, activeMode).then((g) => {
+                networkCacheRef.current.set(cacheKey, g);
+                setGraph(g);
+              })
             : Promise.resolve(),
         money: () =>
           api.moneyGraph(1000, 300).then((g) => {
+            networkCacheRef.current.set(cacheKey, g);
             setMoneyGraph(g);
             revealCycle(g);
           }),
-        link: () => api.accountPhoneGraph(200).then((g) => setLinkGraph(g)),
-        coincidence: () => api.coincidence(3600, 100).then((r) => setHits(r.hits)),
+        link: () =>
+          api.accountPhoneGraph(200).then((g) => {
+            networkCacheRef.current.set(cacheKey, g);
+            setLinkGraph(g);
+          }),
+        coincidence: () =>
+          api.coincidence(3600, 100).then((r) => {
+            networkCacheRef.current.set(cacheKey, r.hits);
+            setHits(r.hits);
+          }),
       };
+
       loaders[t]()
-        .catch((e) =>
-          toast.error(
-            e.status === 409
-              ? "No data loaded."
-              : t === "calls"
+        .catch((e) => {
+          if (e.status !== 409 && e.status !== 425) {
+            toast.error(
+              t === "calls"
                 ? "Failed to load network graph."
                 : "Failed to load graph."
-          )
-        )
+            );
+          }
+        })
         .finally(() => setLoading(false));
     },
-    [mode]
+    [mode, revealCycle]
   );
 
+  // Initial phone loading: run once per dataset or when graphs become ready
   useEffect(() => {
+    if (!isGraphReady && !pipeline?.dataset_id) {
+      setLoading(false);
+      return;
+    }
     api
       .phones(0, 100)
       .then((res) => {
-        setPhones(res.phones);
-        if (res.phones.length > 0) {
+        setPhones(res.phones || []);
+        if (res.phones && res.phones.length > 0) {
           const top = res.phones[0].phone;
           setSelected(top);
-          loadTab("calls", top);
+          loadTab("calls", top, mode);
         } else {
           loadTab("calls");
         }
       })
       .catch((e) => {
-        if (e.status !== 409) toast.error("Failed to load phones.");
-      });
-  }, [loadTab]);
+        if (e.status !== 409 && e.status !== 425) toast.error("Failed to load phones.");
+      })
+      .finally(() => setLoading(false));
+  }, [pipeline?.dataset_id, isGraphReady]);
 
   const switchTab = (t: Tab) => {
     setTab(t);
-    loadTab(t, selected ?? undefined);
+    loadTab(t, selected ?? undefined, mode);
   };
 
   const loadEgo = (phone: string) => {
     setSelected(phone);
     setTab("calls");
-    loadTab("calls", phone);
+    loadTab("calls", phone, mode);
+  };
+
+  const handleModeChange = (newMode: "evidence" | "full") => {
+    setMode(newMode);
+    if (selected) {
+      loadTab("calls", selected, newMode);
+    }
   };
 
   const nodeKindOf = (id: string, kind?: string): string => {
@@ -527,7 +512,6 @@ export function NetworkSection() {
     { id: "calls", label: "Call Network", icon: Phone },
     { id: "money", label: "Money Flow", icon: Landmark },
     { id: "link", label: "Accounts ↔ Phones", icon: GitFork },
-    
     { id: "coincidence", label: "Correlations", icon: Crosshair },
   ];
 
@@ -575,7 +559,7 @@ export function NetworkSection() {
                 </Select>
                 <div className="flex items-center rounded-lg border border-border p-0.5 text-xs">
                   <button
-                    onClick={() => setMode("evidence")}
+                    onClick={() => handleModeChange("evidence")}
                     className={`flex items-center gap-1 rounded-md px-2.5 py-1.5 font-medium transition-colors ${
                       mode === "evidence" ? "bg-emerald-500/15 text-emerald-500" : "text-muted-foreground hover:text-foreground"
                     }`}
@@ -585,7 +569,7 @@ export function NetworkSection() {
                     Evidence
                   </button>
                   <button
-                    onClick={() => setMode("full")}
+                    onClick={() => handleModeChange("full")}
                     className={`flex items-center gap-1 rounded-md px-2.5 py-1.5 font-medium transition-colors ${
                       mode === "full" ? "bg-emerald-500/15 text-emerald-500" : "text-muted-foreground hover:text-foreground"
                     }`}
@@ -818,4 +802,4 @@ export function NetworkSection() {
       )}
     </div>
   );
-}
+});

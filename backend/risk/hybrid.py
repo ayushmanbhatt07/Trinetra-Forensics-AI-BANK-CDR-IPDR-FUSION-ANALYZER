@@ -30,6 +30,7 @@ anomaly UI can cite exactly why a record is risky.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import threading
 
@@ -37,7 +38,7 @@ from ..behavioural import score_transactions
 from ..fusion import fraud_heat
 from .ensemble import ensemble_scores
 from .features import txn_ml_scores
-from .graph_features import graph_features
+from .graph_features import graph_features, graph_score as _batch_graph_score
 from .internet import internet_scores
 from .moneyflow import money_flow_analysis
 from .profiles import account_profile_deviation, profile_deviation
@@ -55,12 +56,11 @@ logger = logging.getLogger(__name__)
 _cache: dict = {}
 _CACHE_KEY = "hybrid"
 _cache_lock = threading.Lock()
-_computing: dict[str, threading.Event] = {}
+
 
 def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
-        _computing.clear()
 
 
 # api-layer convenience alias (clear_hybrid_cache is the documented name)
@@ -75,40 +75,23 @@ def _fingerprint(bundle: dict) -> tuple:
             tuple((r.get("txn_id") or "")[:8] for r in bank[:5]))
 
 
-def _fetch(bundle: dict, block: bool = True) -> dict | None:
+def _fetch(bundle: dict) -> dict:
     key = _CACHE_KEY + ":" + repr(_fingerprint(bundle))
-
+    # Fast path: check cache without lock
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    
+    # Cache miss: acquire lock and compute
     with _cache_lock:
+        # Check again in case another thread already computed it
         hit = _cache.get(key)
         if hit is not None:
             return hit
             
-        event = _computing.get(key)
-        if event is None:
-            if not block:
-                return None
-            event = threading.Event()
-            _computing[key] = event
-            is_worker = True
-        else:
-            is_worker = False
-
-    if is_worker:
-        try:
-            result = _compute(bundle)
-            with _cache_lock:
-                _cache[key] = result
-            return result
-        finally:
-            with _cache_lock:
-                _computing.pop(key, None)
-            event.set()
-    else:
-        if not block:
-            return None
-        event.wait()
-        with _cache_lock:
-            return _cache.get(key, {})
+        result = _compute(bundle)
+        _cache[key] = result
+        return result
 
 
 def _compute(bundle: dict) -> dict:
@@ -121,22 +104,151 @@ def _compute(bundle: dict) -> dict:
                           "graph": {"nodes": 0, "edges": 0, "communities": 0},
                           "ensemble_detectors": [], "ensemble_fitted": False}}
 
-    # ---- engine outputs ------------------------------------------------
-    behavioural = score_transactions(bundle)
-    heat = fraud_heat(bundle)
-    heat_by_acc = {a["account_no"]: a for a in heat["accounts"]}
-    ens = ensemble_scores(bundle)
-    ens_by_acc = {a["account_no"]: a for a in ens["accounts"]}
-    tml = txn_ml_scores(bundle)
-    prof_txn = profile_deviation(bundle)
-    prof_acc = account_profile_deviation(bundle)
-    temporal_txn = txn_temporal_scores(bundle)
-    acc_temporal = account_temporal_scores(bundle)
-    telecom = telecom_scores(bundle)
-    internet = internet_scores(bundle)
-    moneyflow = money_flow_analysis(bundle)
-    entity = entity_risk(bundle)
-    gfeats, gmeta = graph_features(bundle)
+    # ---- Group 1: Fully independent engines run in parallel ----------------
+    # These engines only need `bundle` as input. They have no data dependencies
+    # on each other and can safely run concurrently.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    g1_results: dict = {
+        "behavioural": [], "heat": {"accounts": []}, "ens": {"accounts": [], "detectors": []},
+        "tml": {}, "prof_txn": {}, "prof_acc": {}, "temporal_txn": {}, "acc_temporal": {},
+        "telecom": {"txn": {}, "phone": {}}, "internet": {"txn": {}, "ip": {}}
+    }
+
+    def _run_behavioural():
+        try: return ("behavioural", score_transactions(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] score_transactions failed: %s", e)
+            return ("behavioural", [])
+
+    def _run_heat():
+        try: return ("heat", fraud_heat(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] fraud_heat failed: %s", e)
+            return ("heat", {"accounts": []})
+
+    def _run_ensemble():
+        try: return ("ens", ensemble_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] ensemble_scores failed: %s", e)
+            return ("ens", {"accounts": [], "detectors": []})
+
+    def _run_txn_ml():
+        try: return ("tml", txn_ml_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] txn_ml_scores failed: %s", e)
+            return ("tml", {})
+
+    def _run_prof_txn():
+        try: return ("prof_txn", profile_deviation(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] profile_deviation failed: %s", e)
+            return ("prof_txn", {})
+
+    def _run_prof_acc():
+        try: return ("prof_acc", account_profile_deviation(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] account_profile_deviation failed: %s", e)
+            return ("prof_acc", {})
+
+    def _run_temporal_txn():
+        try: return ("temporal_txn", txn_temporal_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] txn_temporal_scores failed: %s", e)
+            return ("temporal_txn", {})
+
+    def _run_temporal_acc():
+        try: return ("acc_temporal", account_temporal_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] account_temporal_scores failed: %s", e)
+            return ("acc_temporal", {})
+
+    def _run_telecom():
+        try: return ("telecom", telecom_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] telecom_scores failed: %s", e)
+            return ("telecom", {"txn": {}, "phone": {}})
+
+    def _run_internet():
+        try: return ("internet", internet_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] internet_scores failed: %s", e)
+            return ("internet", {"txn": {}, "ip": {}})
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futs = [
+            executor.submit(_run_behavioural),
+            executor.submit(_run_heat),
+            executor.submit(_run_ensemble),
+            executor.submit(_run_txn_ml),
+            executor.submit(_run_prof_txn),
+            executor.submit(_run_prof_acc),
+            executor.submit(_run_temporal_txn),
+            executor.submit(_run_temporal_acc),
+            executor.submit(_run_telecom),
+            executor.submit(_run_internet),
+        ]
+        for f in as_completed(futs):
+            try:
+                key, val = f.result()
+                g1_results[key] = val
+            except Exception as e:
+                logger.warning("[HYBRID] G1 worker raised unhandled: %s", e)
+
+    behavioural = g1_results["behavioural"]
+    heat = g1_results["heat"]
+    ens = g1_results["ens"]
+    tml = g1_results["tml"]
+    prof_txn = g1_results["prof_txn"]
+    prof_acc = g1_results["prof_acc"]
+    temporal_txn = g1_results["temporal_txn"]
+    acc_temporal = g1_results["acc_temporal"]
+    telecom = g1_results["telecom"]
+    internet = g1_results["internet"]
+
+    heat_by_acc = {a["account_no"]: a for a in heat.get("accounts", [])}
+    ens_by_acc = {a["account_no"]: a for a in ens.get("accounts", [])}
+
+    # ---- Group 2: Engines that depend on group 1 results -------------------
+    def _run_moneyflow():
+        try: return ("moneyflow", money_flow_analysis(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] money_flow_analysis failed: %s", e)
+            return ("moneyflow", {"accounts": {}, "transactions": {}})
+
+    def _run_entity():
+        try: return ("entity", entity_risk(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] entity_risk failed: %s", e)
+            return ("entity", {"account_exposure": {}, "entities": {}})
+
+    def _run_graph():
+        try: return ("gfeats", graph_features(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] graph_features failed: %s", e)
+            return ("gfeats", ({}, {}))
+
+    g2_results: dict = {
+        "moneyflow": {"accounts": {}, "transactions": {}},
+        "entity": {"account_exposure": {}, "entities": {}},
+        "gfeats": ({}, {})
+    }
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futs2 = [
+            executor.submit(_run_moneyflow),
+            executor.submit(_run_entity),
+            executor.submit(_run_graph),
+        ]
+        for f in as_completed(futs2):
+            try:
+                key, val = f.result()
+                g2_results[key] = val
+            except Exception as e:
+                logger.warning("[HYBRID] G2 worker raised unhandled: %s", e)
+
+    moneyflow = g2_results["moneyflow"]
+    entity = g2_results["entity"]
+    gfeats, gmeta = g2_results["gfeats"]
 
     beh_by_id = {b["transaction_id"]: b for b in behavioural}
 
@@ -155,6 +267,16 @@ def _compute(bundle: dict) -> dict:
     flow_by_acc = moneyflow["accounts"]
     ent_by_acc = entity["account_exposure"]
 
+    # Pre-compute graph scores for ALL accounts in one batch (avoids
+    # re-normalising per account which was the old per-account bottleneck).
+    all_graph_scores = _batch_graph_score(gfeats) if gfeats else {}
+
+    hw = hybrid_weights()
+    w_trules, w_tml, w_tbeh = hw.get("txn_rules", 0.30), hw.get("txn_ml", 0.20), hw.get("txn_behaviour", 0.25)
+    w_ttemp, w_ttel, w_tnet = hw.get("txn_temporal", 0.10), hw.get("txn_telecom", 0.10), hw.get("txn_internet", 0.05)
+    w_ttotal = w_trules + w_tml + w_tbeh + w_ttemp + w_ttel + w_tnet
+    inv_ttotal = (1.0 / w_ttotal) if w_ttotal > 0 else 0.0
+
     # ---- per-transaction hybrid ----------------------------------------
     transactions: dict[str, dict] = {}
     skipped = 0
@@ -170,14 +292,15 @@ def _compute(bundle: dict) -> dict:
         temp = temporal_txn.get(tid, {})
         tel = telecom["txn"].get(tid, {})
         net = internet["txn"].get(tid, {})
-        hybrid = renormalise({
-            "txn_rules": rules_score,
-            "txn_ml": ml_score,
-            "txn_behaviour": float(prof.get("score", 0.0)),
-            "txn_temporal": float(temp.get("temporal_score", 0.0)),
-            "txn_telecom": float(tel.get("call_assist_score", 0.0)),
-            "txn_internet": float(net.get("internet_score", 0.0)),
-        })
+        beh_val = float(prof.get("score", 0.0))
+        temp_val = float(temp.get("temporal_score", 0.0))
+        tel_val = float(tel.get("call_assist_score", 0.0))
+        net_val = float(net.get("internet_score", 0.0))
+
+        raw_sum = (w_trules * rules_score + w_tml * ml_score + w_tbeh * beh_val
+                   + w_ttemp * temp_val + w_ttel * tel_val + w_tnet * net_val)
+        hybrid = round(min(100.0, max(0.0, raw_sum * inv_ttotal)), 2)
+
         rec = dict(b)
         rec.update({
             "risk_score": hybrid,
@@ -185,16 +308,12 @@ def _compute(bundle: dict) -> dict:
             "hybrid_components": {
                 "rules": round(rules_score, 2),
                 "ml": round(ml_score, 2),
-                "behaviour": round(float(prof.get("score", 0.0)), 2),
-                "temporal": round(float(temp.get("temporal_score", 0.0)), 2),
-                "telecom": round(float(tel.get("call_assist_score", 0.0)), 2),
-                "internet": round(float(net.get("internet_score", 0.0)), 2),
+                "behaviour": round(beh_val, 2),
+                "temporal": round(temp_val, 2),
+                "telecom": round(tel_val, 2),
+                "internet": round(net_val, 2),
             },
-            "models_fired": _models_fired(rules_score, ml_score,
-                                          float(prof.get("score", 0.0)),
-                                          float(temp.get("temporal_score", 0.0)),
-                                          float(tel.get("call_assist_score", 0.0)),
-                                          float(net.get("internet_score", 0.0))),
+            "models_fired": _models_fired(rules_score, ml_score, beh_val, temp_val, tel_val, net_val),
             "scenarios": txn_scen.get(tid, []),
         })
         transactions[tid] = rec
@@ -216,10 +335,10 @@ def _compute(bundle: dict) -> dict:
             "acc_ml": ml,
             "acc_behaviour": float(beh.get("behaviour_score", 0.0)),
             "acc_temporal": float(temp.get("temporal_score", 0.0)),
-            "acc_graph": float(_graph_score(graph)),
+            "acc_graph": float(all_graph_scores.get(acc, 0.0)),
             "acc_entity": float(ent.get("entity_risk", 0.0)),
             "acc_moneyflow": float(flow.get("flow_score", 0.0)),
-        })
+        }, weights=hw)
         accounts[acc] = {
             "account_no": acc,
             "risk_score": hybrid,
@@ -229,7 +348,7 @@ def _compute(bundle: dict) -> dict:
                 "ml_ensemble": round(ml, 2),
                 "behaviour": round(float(beh.get("behaviour_score", 0.0)), 2),
                 "temporal": round(float(temp.get("temporal_score", 0.0)), 2),
-                "graph": round(float(_graph_score(graph)), 2),
+                "graph": round(float(all_graph_scores.get(acc, 0.0)), 2),
                 "entity": round(float(ent.get("entity_risk", 0.0)), 2),
                 "moneyflow": round(float(flow.get("flow_score", 0.0)), 2),
             },
@@ -258,7 +377,7 @@ def _compute(bundle: dict) -> dict:
                 "ent_temporal": 0.0,
                 "ent_telecom": _phone_telecom(telecom, kind, entity_id),
                 "ent_internet": _phone_internet(internet, kind, entity_id),
-            })
+            }, weights=hw)
             entities[f"{kind}:{entity_id}"] = {
                 "entity": entity_id,
                 "kind": kind,
@@ -274,23 +393,14 @@ def _compute(bundle: dict) -> dict:
                 "ncrp": ent["ncrp"],
                 "reasons": ent["reasons"],
             }
-
-    transactions_sorted = list(transactions.values())
-    transactions_sorted.sort(key=lambda r: (-r["risk_score"], r.get("risk_band", "")))
-    
-    accounts_sorted = list(accounts.values())
-    accounts_sorted.sort(key=lambda r: -r["risk_score"])
-    
-    entities_sorted = list(entities.values())
-    entities_sorted.sort(key=lambda r: -r["risk_score"])
+    scored_sorted = list(transactions.values())
+    scored_sorted.sort(key=lambda r: (-r.get("risk_score", 0.0), r.get("risk_band", "")))
 
     return {
         "transactions": transactions,
-        "transactions_sorted": transactions_sorted,
+        "sorted_transactions": scored_sorted,
         "accounts": accounts,
-        "accounts_sorted": accounts_sorted,
         "entities": entities,
-        "entities_sorted": entities_sorted,
         "scenarios": scenarios,
         "entity_risk": entity,
         "stats": {
@@ -339,9 +449,9 @@ def _phone_internet(internet: dict, kind: str, entity_id: str) -> float:
     return float(hit.get("shared_ip_score", 0.0))
 
 
-def hybrid_analyze(bundle: dict, block: bool = True) -> dict | None:
+def hybrid_analyze(bundle: dict) -> dict:
     """Top-level entry point (cached)."""
-    return _fetch(bundle, block=block)
+    return _fetch(bundle)
 
 
 def hybrid_analyze_fast(bundle: dict) -> dict | None:
@@ -350,36 +460,33 @@ def hybrid_analyze_fast(bundle: dict) -> dict | None:
     return _cache.get(key)
 
 
-def hybrid_transaction_risk(bundle: dict, min_score: float = 0.0) -> list[dict] | None:
+def hybrid_transaction_risk(bundle: dict, min_score: float = 0.0) -> list[dict]:
     """Hybrid per-transaction risk, sorted descending (cache-aware)."""
-    res = _fetch(bundle, block=False)
-    if res is None:
-        return None
-    rows = res["transactions_sorted"]
+    res = _fetch(bundle)
+    rows = list(res["transactions"].values())
+    rows.sort(key=lambda r: (-r["risk_score"], r.get("risk_band", "")))
     if min_score > 0:
         rows = [r for r in rows if r["risk_score"] >= min_score]
     return rows
 
 
-def hybrid_account_risk(bundle: dict) -> list[dict] | None:
-    res = _fetch(bundle, block=False)
-    if res is None:
-        return None
-    return res["accounts_sorted"]
+def hybrid_account_risk(bundle: dict) -> list[dict]:
+    res = _fetch(bundle)
+    rows = list(res["accounts"].values())
+    rows.sort(key=lambda r: -r["risk_score"])
+    return rows
 
 
-def hybrid_entity_risk(bundle: dict) -> list[dict] | None:
-    res = _fetch(bundle, block=False)
-    if res is None:
-        return None
-    return res["entities_sorted"]
+def hybrid_entity_risk(bundle: dict) -> list[dict]:
+    res = _fetch(bundle)
+    rows = list(res["entities"].values())
+    rows.sort(key=lambda r: -r["risk_score"])
+    return rows
 
 
-def explanations_for_txn(bundle: dict, txn_id: str) -> dict | None:
+def explanations_for_txn(bundle: dict, txn_id: str) -> dict:
     """Full explainability payload for one transaction."""
-    res = _fetch(bundle, block=False)
-    if res is None:
-        return None
+    res = _fetch(bundle)
     txn = res["transactions"].get(txn_id)
     if txn is None:
         return {}
@@ -400,10 +507,8 @@ def explanations_for_txn(bundle: dict, txn_id: str) -> dict | None:
     return explain_transaction(txn_id, txn, info)
 
 
-def explanations_for_account(bundle: dict, account_no: str) -> dict | None:
-    res = _fetch(bundle, block=False)
-    if res is None:
-        return None
+def explanations_for_account(bundle: dict, account_no: str) -> dict:
+    res = _fetch(bundle)
     acc = res["accounts"].get(account_no)
     if acc is None:
         return {}
@@ -419,10 +524,8 @@ def explanations_for_account(bundle: dict, account_no: str) -> dict | None:
     return explain_account(account_no, info)
 
 
-def explanations_for_entity(bundle: dict, kind: str, entity: str) -> dict | None:
-    res = _fetch(bundle, block=False)
-    if res is None:
-        return None
+def explanations_for_entity(bundle: dict, kind: str, entity: str) -> dict:
+    res = _fetch(bundle)
     ent = res["entities"].get(f"{kind}:{entity}")
     if ent is None:
         return {}
@@ -449,23 +552,34 @@ def _txn_timeline(bundle: dict, txn: dict) -> list[dict]:
     events = []
     phone = txn.get("sender_phone") or ""
     w = 3600
-    for r in bundle.get("cdr", []):
-        rts = float(r.get("ts") or 0.0)
-        if rts and abs(rts - ts) <= w:
-            a, b = r.get("a_number") or "", r.get("b_number") or ""
-            if phone and phone not in (a, b):
-                continue
-            events.append({"kind": "call", "ts": rts,
-                           "detail": f"{a} -> {b} "
-                                     f"({r.get('duration_sec')}s)"})
-    for r in bundle.get("ipdr", []):
-        rts = float(r.get("start_ts") or 0.0)
-        if rts and abs(rts - ts) <= w:
-            if phone and r.get("msisdn") != phone:
-                continue
-            events.append({"kind": "session", "ts": rts,
-                           "detail": f"{r.get('msisdn')} "
-                                     f"@ {r.get('ip') or '?'}"})
+    from backend.events import _get_ts_indexes
+    idx = _get_ts_indexes(bundle)
+    
+    cts, cr = idx["cdr_ts"], idx["cdr_r"]
+    i0 = bisect.bisect_left(cts, ts - w)
+    i1 = bisect.bisect_right(cts, ts + w)
+    for i in range(i0, min(i1, i0 + 30)):
+        r = cr[i]
+        a, b = r.get("a_number") or "", r.get("b_number") or ""
+        if phone and phone not in (a, b):
+            continue
+        events.append({"kind": "call", "ts": cts[i],
+                       "detail": f"{a} -> {b} ({r.get('duration_sec')}s)"})
+        if len(events) >= 12:
+            break
+
+    its, ir = idx["ipdr_ts"], idx["ipdr_r"]
+    i0 = bisect.bisect_left(its, ts - w)
+    i1 = bisect.bisect_right(its, ts + w)
+    for i in range(i0, min(i1, i0 + 30)):
+        r = ir[i]
+        if phone and r.get("msisdn") != phone:
+            continue
+        events.append({"kind": "session", "ts": its[i],
+                       "detail": f"{r.get('msisdn')} @ {r.get('ip') or '?'}"})
+        if len(events) >= 20:
+            break
+
     events.sort(key=lambda e: e["ts"])
     return events[:12]
 
@@ -474,15 +588,22 @@ def _neighbours(bundle: dict, txn: dict) -> list[dict]:
     """Other transactions from the same customer nearby in time."""
     cust = txn.get("sender_customer_id") or txn.get("account_no") or ""
     ts = float(txn.get("ts") or 0.0)
+    if not ts:
+        return []
     out = []
-    for r in bundle.get("bank", []):
+    from backend.events import _get_ts_indexes
+    idx = _get_ts_indexes(bundle)
+    bts, br = idx["bank_ts"], idx["bank_r"]
+    i0 = bisect.bisect_left(bts, ts - 3600)
+    i1 = bisect.bisect_right(bts, ts + 3600)
+    for i in range(i0, min(i1, i0 + 50)):
+        r = br[i]
         if r.get("customer_id") != cust and r.get("account_no") != cust:
             continue
-        rts = float(r.get("ts") or 0.0)
-        if rts and abs(rts - ts) <= 3600 and r.get("txn_id") != txn.get("txn_id"):
+        if r.get("txn_id") != txn.get("txn_id"):
             out.append({"transaction_id": r.get("txn_id"),
                         "amount": r.get("debit") or r.get("credit") or 0,
-                        "ts": rts})
+                        "ts": bts[i]})
         if len(out) >= 6:
             break
     return out

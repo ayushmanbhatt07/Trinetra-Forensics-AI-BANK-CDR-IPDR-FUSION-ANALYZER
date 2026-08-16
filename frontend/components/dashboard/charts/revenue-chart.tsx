@@ -2,7 +2,7 @@
 // @ts-nocheck
 "use client";
 
-import { useState, useEffect } from "react";
+import React from "react";
 import {
   AreaChart,
   Area,
@@ -10,8 +10,8 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  ResponsiveContainer,
 } from "recharts";
+import { SafeChartContainer } from "@/components/ui/safe-chart-container";
 
 const data = [
   { month: "Jan", flagged: 1860, reviewed: 1800 },
@@ -28,16 +28,9 @@ const data = [
   { month: "Dec", flagged: 5470, reviewed: 3800 },
 ];
 
-export function RevenueChart() {
-  const [isLoaded, setIsLoaded] = useState(false);
-
-  useEffect(() => {
-    const timer = setTimeout(() => setIsLoaded(true), 300);
-    return () => clearTimeout(timer);
-  }, []);
-
+export const RevenueChart = React.memo(function RevenueChart() {
   return (
-    <div className="bg-card border border-border rounded-xl p-5 h-[380px] animate-in fade-in slide-in-from-bottom-4 duration-500">
+    <div className="bg-card border border-border rounded-xl p-5 h-[380px] min-h-[380px] w-full min-w-0">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h3 className="text-base font-semibold text-foreground">Anomaly Detection Trend</h3>
@@ -55,8 +48,8 @@ export function RevenueChart() {
         </div>
       </div>
 
-      <div className={`h-[280px] transition-opacity duration-700 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}>
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-[280px] min-h-[280px] w-full min-w-0">
+        <SafeChartContainer className="w-full h-full min-w-0 min-h-0">
           <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="flaggedGradient" x1="0" y1="0" x2="0" y2="1">
@@ -99,6 +92,7 @@ export function RevenueChart() {
               strokeWidth={2}
               fill="url(#reviewedGradient)"
               dot={false}
+              isAnimationActive={false}
             />
             <Area
               type="monotone"
@@ -107,10 +101,11 @@ export function RevenueChart() {
               strokeWidth={2}
               fill="url(#flaggedGradient)"
               dot={false}
+              isAnimationActive={false}
             />
           </AreaChart>
-        </ResponsiveContainer>
+        </SafeChartContainer>
       </div>
     </div>
   );
-}
+});

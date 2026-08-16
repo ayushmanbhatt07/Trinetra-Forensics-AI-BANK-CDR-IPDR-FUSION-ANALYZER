@@ -690,31 +690,49 @@ def cached_fused_base(bundle: dict) -> list[dict]:
         return result
 
 def fused_table(bundle: dict, offset: int = 0, limit: int = 100,
-                q: str = "", account: str = "", mode: str = "", scored: dict | None = None) -> dict:
+                q: str = "", account: str = "", mode: str = "", scored: dict | None = None,
+                date_start: str = "", date_end: str = "", min_amount: float = 0.0,
+                max_amount: float = 0.0, risk_band: str = "") -> dict:
     base_rows = cached_fused_base(bundle)
     q_low = (q or "").strip().lower()
     account_low = (account or "").strip().lower()
     mode_low = (mode or "").strip().lower()
+    risk_low = (risk_band or "").strip().lower()
     
-    if q_low or account_low or mode_low:
-        kept = []
-        for row in base_rows:
-            if account_low and account_low not in str(row["account_no"]).lower():
+    kept = []
+    for row in base_rows:
+        if account_low and account_low not in str(row["account_no"]).lower():
+            continue
+        if mode_low and mode_low != "all" and mode_low not in str(row.get("mode", "")).lower():
+            continue
+        if q_low:
+            hay = " ".join(str(row.get(k) or "") for k in (
+                "transaction_id", "account_no", "account_name",
+                "counterparty_name", "receiver_account",
+                "sender_phone", "receiver_phone", "bank")).lower()
+            if q_low not in hay:
                 continue
-            if mode_low:
-                m = str(row.get("mode") or "").strip().lower()
-                if mode_low not in m:
-                    continue
-            if q_low:
-                hay = " ".join(str(row.get(k) or "") for k in (
-                    "transaction_id", "account_no", "account_name",
-                    "counterparty_name", "receiver_account",
-                    "sender_phone", "receiver_phone", "bank")).lower()
-                if q_low not in hay:
-                    continue
-            kept.append(row)
-    else:
-        kept = base_rows
+                
+        # --- Advanced Filters ---
+        r_date = str(row.get("date") or "")
+        if date_start and r_date < date_start:
+            continue
+        if date_end and r_date > date_end:
+            continue
+            
+        r_amt = float(row.get("amount") or 0.0)
+        if min_amount > 0 and r_amt < min_amount:
+            continue
+        if max_amount > 0 and r_amt > max_amount:
+            continue
+            
+        if risk_low and risk_low != "all":
+            s = (scored or {}).get(row["transaction_id"]) or {}
+            r_band = str(s.get("risk_band") or "SAFE").lower()
+            if risk_low != r_band:
+                continue
+                
+        kept.append(row)
 
     total = len(kept)
     page_rows = [dict(r) for r in kept[offset:offset + limit]]

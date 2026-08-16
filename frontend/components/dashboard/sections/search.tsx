@@ -1,14 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Search, Loader2, Hash, Phone, Landmark, CreditCard, FileWarning, Globe, ArrowLeft, ShieldAlert, Activity, Users, Network, Bot, BrainCircuit, FileText, Zap, PlusCircle, Share2 } from "lucide-react";
 import { api, type CopilotQueryResult } from "@/lib/api";
 import { toast } from "sonner";
 import { motion } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
+import { usePipeline } from "@/lib/pipeline-context";
 
-export function SearchSection() {
+export const SearchSection = React.memo(function SearchSection() {
+  const { pipeline } = usePipeline();
   const [query, setQuery] = useState("");
   const [dossier, setDossier] = useState<CopilotQueryResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -18,6 +20,10 @@ export function SearchSection() {
     "Find every account sharing this UPI",
     "Who communicated before this transaction?",
   ]);
+
+  useEffect(() => {
+    setDossier(null);
+  }, [pipeline?.dataset_id]);
 
   const runSearch = async (q: string) => {
     if (!q.trim()) return;
@@ -100,7 +106,7 @@ export function SearchSection() {
       </motion.div>
     </div>
   );
-}
+});
 
 
 function EntityDossier({ data, query, onBack }: { data: CopilotQueryResult; query: string; onBack: () => void }) {

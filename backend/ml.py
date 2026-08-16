@@ -46,6 +46,7 @@ def _account_features(bundle: dict) -> list[dict]:
             "account_no": acc, "credit": 0.0, "debit": 0.0, "amounts": [],
             "counterparties": set(), "phones": set(), "upis": set(),
             "round": 0, "night": 0, "txns": 0,
+            "merchants": set(), "max_burst": 0, "max_dormant": 0
         })
         d["txns"] += 1
         amt = r.get("credit") or r.get("debit") or 0.0
@@ -70,6 +71,18 @@ def _account_features(bundle: dict) -> list[dict]:
                     d["night"] += 1
             except ValueError:
                 pass
+        
+        merch = r.get("merchant_name")
+        if merch:
+            d["merchants"].add(merch)
+            
+        burst = r.get("feat_burst_indicator") or 0
+        if burst > d["max_burst"]:
+            d["max_burst"] = burst
+            
+        dorm = r.get("feat_dormant_activation") or 0
+        if dorm > d["max_dormant"]:
+            d["max_dormant"] = dorm
 
     rapids = {rp["account_no"] for rp in rapid_payouts(bundle)}
     rows = []
@@ -89,10 +102,10 @@ def _account_features(bundle: dict) -> list[dict]:
             "night_share": d["night"] / n,
             "rapid_payouts": 1 if acc in rapids else 0,
             
-            # Incorporate new semantic features at the account level
-            "merchant_diversity": len({r.get("merchant_name") for r in bank if r.get("account_no") == acc and r.get("merchant_name")}),
-            "burst_indicator": max([r.get("feat_burst_indicator", 0) for r in bank if r.get("account_no") == acc] + [0]),
-            "dormant_activation": max([r.get("feat_dormant_activation", 0) for r in bank if r.get("account_no") == acc] + [0]),
+            # Incorporate semantic features at the account level (O(1) lookups)
+            "merchant_diversity": len(d["merchants"]),
+            "burst_indicator": d["max_burst"],
+            "dormant_activation": d["max_dormant"],
         })
     return rows
 
@@ -125,34 +138,18 @@ def ml_outliers(bundle: dict, contamination: float = 0.05,
     iso_pred = iso.fit_predict(X_scaled)
     iso_scores = -iso.score_samples(X_scaled)  # higher is more anomalous
     
-    # 2. Local Outlier Factor
-    # Avoid n_neighbors > n_samples error
-    n_neighbors = min(20, len(X_scaled) - 1)
-    lof = LocalOutlierFactor(n_neighbors=n_neighbors, contamination=contamination, novelty=False)
-    lof_pred = lof.fit_predict(X_scaled)
-    lof_scores = -lof.negative_outlier_factor_
-    
-    # 3. One-Class SVM
-    svm = OneClassSVM(nu=min(contamination, 0.5), kernel="rbf", gamma="scale")
-    svm_pred = svm.fit_predict(X_scaled)
-    svm_scores = -svm.score_samples(X_scaled)
-    
-    # Normalize scores to 0-1 for unified score
+    # 2. Z-score extreme fallback
+    z_flagged = _zscore_outliers(X_scaled, contamination)
+
+    # Normalize score to 0-1
     def _norm(arr):
         mn, mx = arr.min(), arr.max()
         return (arr - mn) / (mx - mn + 1e-9)
         
-    iso_n = _norm(iso_scores)
-    lof_n = _norm(lof_scores)
-    svm_n = _norm(svm_scores)
-    
-    # Unified Fraud Score (Ensemble average)
-    unified_scores = (iso_n + lof_n + svm_n) / 3.0
+    unified_scores = _norm(iso_scores)
     
     # Z-score extreme fallback
-    z_flagged = _zscore_outliers(X_scaled, contamination)
-
-    flagged = set(np.where(iso_pred == -1)[0].tolist()) | set(np.where(lof_pred == -1)[0].tolist()) | set(np.where(svm_pred == -1)[0].tolist()) | z_flagged
+    flagged = set(np.where(iso_pred == -1)[0].tolist()) | z_flagged
 
     accounts = []
     for i in sorted(flagged):
@@ -161,8 +158,7 @@ def ml_outliers(bundle: dict, contamination: float = 0.05,
         # Generate an AI-ready explanation block for this account's anomaly
         reasons = []
         if iso_pred[i] == -1: reasons.append("Isolation Forest (Global Shape Deviation)")
-        if lof_pred[i] == -1: reasons.append("Local Outlier Factor (Density Deviation)")
-        if svm_pred[i] == -1: reasons.append("One-Class SVM (Margin Outlier)")
+        if i in z_flagged: reasons.append("Z-Score (Extreme Feature Value)")
         if r.get("rapid_payouts"): reasons.append("Rapid Payout Sequence Detected")
         if r.get("dormant_activation"): reasons.append("Dormant Account Reactivation")
         

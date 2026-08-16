@@ -46,6 +46,20 @@ CREATE TABLE IF NOT EXISTS findings (
     severity         TEXT NOT NULL DEFAULT 'medium',
     created          TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+    job_id           TEXT PRIMARY KEY,
+    dataset_id       TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    stage            TEXT NOT NULL,
+    progress         INTEGER,
+    started_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    completed_at     TEXT,
+    error_message    TEXT,
+    fused_ready      INTEGER NOT NULL DEFAULT 0,
+    anomalies_ready  INTEGER NOT NULL DEFAULT 0,
+    graphs_ready     INTEGER NOT NULL DEFAULT 0
+);
 """
 
 _KEYS = ("bank", "cdr", "ipdr", "subscribers", "complaints", "entities", "files")
@@ -100,9 +114,84 @@ def load_bundle() -> dict | None:
             conn.close()
     if not rows:
         return None
-    bundle = {k: json.loads(p) for k, p in rows if k in _KEYS}
-    bundle["files"] = bundle.get("files", {"ok": [], "skipped": [], "errors": []})
-    return bundle
+    out = {}
+    for k, p in rows:
+        out[k] = json.loads(p)
+    if "entities" in out:
+        for ek in ("phones", "accounts", "upi_ids", "imeis", "imsis", "ips", "names"):
+            if ek in out["entities"]:
+                out["entities"][ek] = set(out["entities"][ek])
+    return out
+
+
+def clear_bundle() -> None:
+    """Drop all persisted bundle tables and pipeline jobs from SQLite."""
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM bundle")
+                conn.execute("DELETE FROM pipeline_jobs")
+                conn.execute("DELETE FROM findings")
+                conn.execute("DELETE FROM investigations")
+        finally:
+            conn.close()
+
+
+def save_pipeline_job(job: dict) -> None:
+    """Upsert a pipeline job into the database."""
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO pipeline_jobs(job_id, dataset_id, status, stage, progress, started_at, updated_at, completed_at, error_message, fused_ready, anomalies_ready, graphs_ready) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(job_id) DO UPDATE SET "
+                    "status=excluded.status, stage=excluded.stage, progress=excluded.progress, updated_at=excluded.updated_at, "
+                    "completed_at=excluded.completed_at, error_message=excluded.error_message, "
+                    "fused_ready=excluded.fused_ready, anomalies_ready=excluded.anomalies_ready, graphs_ready=excluded.graphs_ready",
+                    (
+                        job["job_id"], job["dataset_id"], job["status"], job["stage"], job.get("progress"),
+                        job["started_at"], job["updated_at"], job.get("completed_at"), job.get("error_message"),
+                        1 if job.get("fused_ready") else 0,
+                        1 if job.get("anomalies_ready") else 0,
+                        1 if job.get("graphs_ready") else 0
+                    )
+                )
+        finally:
+            conn.close()
+
+
+def get_active_pipeline_job() -> dict | None:
+    """Get the most recently updated active pipeline job, if any."""
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT job_id, dataset_id, status, stage, progress, started_at, updated_at, completed_at, error_message, fused_ready, anomalies_ready, graphs_ready "
+                "FROM pipeline_jobs ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+            
+    if not row:
+        return None
+        
+    return {
+        "job_id": row[0],
+        "dataset_id": row[1],
+        "status": row[2],
+        "stage": row[3],
+        "progress": row[4],
+        "started_at": row[5],
+        "updated_at": row[6],
+        "completed_at": row[7],
+        "error_message": row[8],
+        "fused_ready": bool(row[9]),
+        "anomalies_ready": bool(row[10]),
+        "graphs_ready": bool(row[11])
+    }
 
 
 def last_ingested() -> str | None:
@@ -114,16 +203,6 @@ def last_ingested() -> str | None:
         finally:
             conn.close()
     return row[0] if row else None
-
-
-def clear_bundle() -> None:
-    with _lock:
-        conn = _connect()
-        try:
-            with conn:
-                conn.execute("DELETE FROM bundle")
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------

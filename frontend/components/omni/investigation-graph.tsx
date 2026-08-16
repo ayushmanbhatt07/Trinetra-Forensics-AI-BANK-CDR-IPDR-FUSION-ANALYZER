@@ -122,17 +122,10 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const [error, setError] = useState('');
 
-  // Auto-load if initialEntity is provided
-  useEffect(() => {
-    if (initialEntity) {
-      // The function loadGraph will be defined below but we must be careful with dependencies
-      // It's better to call it after definition or keep it simple.
-    }
-  }, [initialEntity]);
-
   const loadGraph = useCallback(async (eid?: string) => {
-    const target = (eid || entityId).trim();
+    const target = (eid || entityId || initialEntity).trim();
     if (!target) return;
+    setEntityId(target);
     setLoading(true);
     setError('');
     setInsights(null);

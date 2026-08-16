@@ -23,8 +23,19 @@ _last_call_meta: Dict[str, Any] = {}
 
 
 def _current_bundle() -> Optional[Dict[str, Any]]:
-    from backend import api
-    return api._state.get("bundle")
+    import sys
+    for mod_name in ("api", "backend.api"):
+        if mod_name in sys.modules:
+            mod = sys.modules[mod_name]
+            if hasattr(mod, "_state"):
+                b = getattr(mod, "_state", {}).get("bundle")
+                if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
+                    return b
+    try:
+        from backend import store
+        return store.load_bundle()
+    except Exception:
+        return None
 
 
 def reset_engine() -> None:
@@ -736,55 +747,72 @@ def generate_graph_insights(payload: InsightsRequest,
     except Exception as e:
         logger.error(f"Error generating insights: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+def _generate_deterministic_audit_report(entity_id: str, txns: list, calls: list, ips: list) -> str:
+    total_val = sum(float(t.get("amount") or 0) for t in txns)
+    debits = sum(float(t.get("amount") or 0) for t in txns if str(t.get("type") or "").upper() in ("DEBIT", "D", "DR"))
+    credits = sum(float(t.get("amount") or 0) for t in txns if str(t.get("type") or "").upper() in ("CREDIT", "C", "CR"))
+    counterparties = {str(t.get("counterparty")) for t in txns if t.get("counterparty")}
+    
+    bullets = [
+        f"**Target Entity Identity**: Forensic records linked to identifier `{entity_id}`.",
+        f"**Financial Audit**: Analyzed {len(txns)} transactions totaling ₹{total_val:,.2f} (Credits: ₹{credits:,.2f}, Debits: ₹{debits:,.2f}).",
+        f"**Network Dispersion**: Discovered financial links with {len(counterparties)} unique counterparty entities.",
+    ]
+    if calls:
+        bullets.append(f"**Telecom Coincidence**: Cross-referenced {len(calls)} voice call sessions in proximity to monetary flow.")
+    if ips:
+        bullets.append(f"**Cyber/IP Footprint**: Captured {len(ips)} IPDR network sessions linked to device hardware.")
+        
+    if debits > 0 and credits > 0 and abs(debits - credits) / max(debits, credits) < 0.15:
+        bullets.append("**Critical Forensic Indicator**: Rapid pass-through liquidity pattern detected (near 1:1 inflow to outflow ratio), indicative of mule layering.")
+    elif len(txns) >= 5 and total_val > 100000:
+        bullets.append("**High-Risk Flag**: Significant cumulative transfer velocity above baseline thresholds.")
+    else:
+        bullets.append("**Behavioral Baseline**: Direct financial activity recorded. Cross-domain correlation active.")
+        
+    return "\n\n".join([f"• {b}" for b in bullets])
 
 
 @router.get("/entity/{entity_id}/details")
-def get_entity_details(entity_id: str, user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
-    """Fetches detailed transactions, calls, and IP sessions for a specific entity ID.
-    Also generates a suspiciousness audit report via LLM."""
+def get_entity_full_details(entity_id: str,
+                            user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
+    """Retrieves full profile, all direct transactions, calls, IP sessions, and an LLM-generated audit report for an entity."""
     try:
-        from backend import api as _api
-        bundle = _api._state.get("bundle")
+        from .db_builder import get_copilot_db
+        bundle = _current_bundle()
         if not bundle:
-            raise HTTPException(409, "no data loaded; POST /ingest first")
+            raise HTTPException(status_code=409, detail="No dataset loaded")
             
-        target = entity_id.lower()
+        conn = get_copilot_db(bundle)
+        cursor = conn.cursor()
         
-        targets = {target}
-        # If target matches a transaction, also include its accounts and phones
-        for r in bundle.get("bank", []):
-            if target == str(r.get("txn_id", "")).lower() or target == str(r.get("transaction_id", "")).lower():
-                targets.add(str(r.get("account_no", "")).lower())
-                targets.add(str(r.get("receiver_account", "")).lower())
-                targets.add(str(r.get("sender_phone", "")).lower())
-                targets.add(str(r.get("receiver_phone", "")).lower())
-        
-        targets = {t for t in targets if t}
-
+        # Normalize targets to search for (e.g. 10-digit, 12-digit phone, raw id)
+        targets = {entity_id.lower()}
+        digits = "".join(c for c in entity_id if c.isdigit())
+        if len(digits) == 10:
+            targets.add("91" + digits)
+            targets.add(digits)
+        elif len(digits) == 12 and digits.startswith("91"):
+            targets.add(digits[2:])
+            targets.add(digits)
+            
         # Collect transactions
         txns = []
-        for r in bundle.get("bank", []):
-            r_acct = str(r.get("account_no", "")).lower()
-            r_recv = str(r.get("receiver_account", "")).lower()
-            r_txn = str(r.get("txn_id", "")).lower()
-            r_txn2 = str(r.get("transaction_id", "")).lower()
-            r_sphone = str(r.get("sender_phone", "")).lower()
-            r_rphone = str(r.get("receiver_phone", "")).lower()
+        for t in bundle.get("bank", []):
+            snd = str(t.get("account_no", "")).lower()
+            rcv = str(t.get("receiver_account", "")).lower()
+            snd_p = str(t.get("sender_phone", "")).lower()
+            rcv_p = str(t.get("receiver_phone", "")).lower()
+            tx_id = str(t.get("transaction_id", "")).lower()
             
-            if any(t in r_acct or t in r_recv or t == r_txn or t == r_txn2 or t in r_sphone or t in r_rphone for t in targets):
-                amt = r.get("amount") or r.get("credit") or r.get("debit") or 0
+            if any(tgt in snd or tgt in rcv or tgt in snd_p or tgt in rcv_p or tgt == tx_id for tgt in targets):
                 txns.append({
-                    "id": r.get("txn_id"),
-                    "date": r.get("date"),
-                    "amount": float(amt),
-                    "type": "C" if str(r.get("txn_type")) == "C" else "D",
-                    "counterparty": r.get("receiver_account") if target in str(r.get("account_no", "")).lower() else r.get("account_no"),
-                    "narration": r.get("narration"),
-                    "bank": r.get("bank"),
-                    "account_no": r.get("account_no"),
-                    "mode": r.get("mode"),
-                    "sender_phone": r.get("sender_phone"),
-                    "receiver_phone": r.get("receiver_phone")
+                    "date": t.get("date"),
+                    "txn_id": t.get("transaction_id"),
+                    "amount": t.get("amount"),
+                    "type": "Debit" if any(tgt in snd or tgt in snd_p for tgt in targets) else "Credit",
+                    "counterparty": t.get("receiver_account") if any(tgt in snd or tgt in snd_p for tgt in targets) else t.get("account_no"),
+                    "bank": t.get("bank")
                 })
                 
         # Collect calls
@@ -810,10 +838,10 @@ def get_entity_details(entity_id: str, user: dict = Depends(auth.require_user)) 
                     "duration": p.get("duration")
                 })
                 
-        # Generate LLM Summary
+        # Generate LLM Summary with robust deterministic fallback
         from .llm_client import LlmClient
         client = LlmClient()
-        audit_report = "No LLM provider configured. Cannot generate detailed audit report."
+        audit_report = ""
         if client.has_provider():
             prompt = (
                 f"You are a financial forensic investigator. The user clicked on entity '{entity_id}' in the graph. "
@@ -826,9 +854,10 @@ def get_entity_details(entity_id: str, user: dict = Depends(auth.require_user)) 
             )
             ok, raw, meta = client.generate_json(prompt, "{}")
             if ok and raw and "audit_report" in raw:
-                audit_report = raw["audit_report"]
-            else:
-                audit_report = "LLM failed to generate an audit report."
+                audit_report = str(raw["audit_report"]).strip()
+
+        if not audit_report or "failed" in audit_report.lower() or "no llm" in audit_report.lower():
+            audit_report = _generate_deterministic_audit_report(entity_id, txns, calls, ips)
                 
         return {
             "entity_id": entity_id,

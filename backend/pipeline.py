@@ -191,8 +191,10 @@ def ingest_folder(folder: str, patterns: tuple[str, ...] | None = None,
                 continue
             paths_to_parse.append((fname, path))
 
+    from . import config
     futures = {}
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as ex:
+    workers = config.parser_threads()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         for fname, path in paths_to_parse:
             futures[ex.submit(_parse_one, path)] = (fname, path)
             

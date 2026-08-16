@@ -37,7 +37,7 @@ const navItems: { id: Section; label: string; icon: React.ElementType }[] = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export function Sidebar({
+export const Sidebar = React.memo(function Sidebar({
   activeSection,
   onSectionChange,
   collapsed,
@@ -114,4 +114,4 @@ export function Sidebar({
       </div>
     </aside>
   );
-}
+});

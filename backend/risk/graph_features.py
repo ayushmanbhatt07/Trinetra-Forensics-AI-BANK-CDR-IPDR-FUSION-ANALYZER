@@ -30,8 +30,8 @@ WALKS_PER_NODE = 10
 WALK_LENGTH = 20
 # Large-graph switch points: exact algorithms below, sampled/linear
 # approximations above (keeps big bundles fast).
-_LARGE_GRAPH = 1000
-_FULL_BETWEENNESS = 400
+_LARGE_GRAPH = 500
+_FULL_BETWEENNESS = 200
 _CTP_PREFIX = "CTP:"
 
 
@@ -62,32 +62,31 @@ def money_flow_graph(bank: list[dict]) -> nx.DiGraph:
 
 def _betweenness(g: nx.DiGraph) -> dict[str, float]:
     n = g.number_of_nodes()
-    if n <= _FULL_BETWEENNESS:
+    if n <= 50:
         return nx.betweenness_centrality(g, normalized=True)
-    # sampled approximation for large graphs (k random seeds, deterministic)
-    k = min(150, max(40, n // 20))
+    # fast sampled approximation for large graphs
+    k = min(30, max(8, n // 50))
     return nx.betweenness_centrality(g, k=k, seed=42, normalized=True)
 
 
 def node2vec_embedding(g: nx.DiGraph) -> tuple[dict[str, np.ndarray], list[str]]:
     """DeepWalk-style random walks + Word2Vec embeddings.
 
-    Returns (node -> vector, ordered node list).  Empty dict when the graph
-    is too small for meaningful embeddings.  Walk volume shrinks on large
-    graphs so the embedding stays fast for big bundles.
+    Returns (node -> vector, ordered node list). Empty dict when the graph
+    is too small for meaningful embeddings. Fast bounded walks ensure low latency.
     """
     if g.number_of_nodes() < 8:
         return {}, []
     try:
         from gensim.models import Word2Vec
-    except ImportError:  # pragma: no cover - gensim is an optional dep
+    except ImportError:
         return {}, []
 
-    big = g.number_of_nodes() >= _LARGE_GRAPH
-    walks_per_node = 4 if big else WALKS_PER_NODE
-    walk_len = 14 if big else WALK_LENGTH
-    epochs = 3 if big else 5
-    dim = 24 if big else EMBED_DIM
+    big = g.number_of_nodes() >= 100
+    walks_per_node = 2 if big else 4
+    walk_len = 8 if big else 12
+    epochs = 2 if big else 3
+    dim = 16 if big else 24
 
     nodes = list(g.nodes())
     successors = {n: list(g.successors(n)) for n in nodes}
@@ -108,7 +107,7 @@ def node2vec_embedding(g: nx.DiGraph) -> tuple[dict[str, np.ndarray], list[str]]
                 walk.append(nbrs[int(rng.integers(0, len(nbrs)))])
             walks.append(walk)
     model = Word2Vec(walks, vector_size=dim, window=5, min_count=1,
-                     workers=1, epochs=epochs, seed=42, sg=1)
+                     workers=4, epochs=epochs, seed=42, sg=0)
     return {n: model.wv[n] for n in nodes}, nodes
 
 

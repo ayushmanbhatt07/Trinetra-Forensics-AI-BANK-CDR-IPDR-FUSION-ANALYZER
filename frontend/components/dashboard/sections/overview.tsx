@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { FlipKpiCard } from "@/components/ui/flip-card";
 import { Database, ShieldAlert, Users, Target, FileText, PhoneCall, Banknote, Activity, Network } from "lucide-react";
-import { api, type Summary, type CopilotStats } from "@/lib/api";
+import { api, isNoDataLoaded, isPipelineNotReady, isNetworkOrWarmupError, type Summary, type CopilotStats } from "@/lib/api";
 import { toast } from "sonner";
+import { usePipeline } from "@/lib/pipeline-context";
 
-export function OverviewSection() {
+export const OverviewSection = React.memo(function OverviewSection() {
+  const { isFusedReady, isAnomaliesReady } = usePipeline();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [copilot, setCopilot] = useState<CopilotStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -16,12 +18,27 @@ export function OverviewSection() {
       .summary()
       .then(setSummary)
       .catch((e) => {
-        if (e.status !== 409) toast.error("Backend unreachable. Is the API running?");
+        if (!isNoDataLoaded(e) && !isPipelineNotReady(e) && !isNetworkOrWarmupError(e)) {
+          toast.error("Failed to load investigation overview.");
+        }
       })
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, []);
+  useEffect(() => {
+    load();
+  }, [isFusedReady, isAnomaliesReady]);
+
+  useEffect(() => {
+    const handleRefresh = () => load();
+    window.addEventListener("pipeline:fused_ready", handleRefresh);
+    window.addEventListener("pipeline:anomalies_ready", handleRefresh);
+    return () => {
+      window.removeEventListener("pipeline:fused_ready", handleRefresh);
+      window.removeEventListener("pipeline:anomalies_ready", handleRefresh);
+    };
+  }, []);
+
 
   useEffect(() => {
     if (!summary) return;
@@ -244,4 +261,4 @@ export function OverviewSection() {
       )}
     </div>
   );
-}
+});

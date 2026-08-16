@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -18,8 +18,10 @@ const KIND_STYLE: Record<string, { label: string; cls: string; icon: LucideIcon 
 import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
 import { EventDossierPanel } from "@/components/dashboard/event-dossier";
+import { usePipeline } from "@/lib/pipeline-context";
 
-export function TimelineSection() {
+export const TimelineSection = React.memo(function TimelineSection() {
+  const { isFusedReady } = usePipeline();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [filter, setFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -32,19 +34,30 @@ export function TimelineSection() {
         if (e.status !== 409) toast.error("Failed to load timeline.");
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [isFusedReady]);
 
   const shown = filter ? events.filter((e) => e.kind === filter) : events;
 
   const [panelPayload, setPanelPayload] = useState<any>(null);
+  const dossierCacheRef = useRef<Map<string, any>>(new Map());
 
   const handleEventClick = async (e: TimelineEvent) => {
+    const key = `${e.kind}:${e.record_id || e.entity}`;
+    const cached = dossierCacheRef.current.get(key);
+    if (cached) {
+      setPanelPayload({ type: "event", info: cached });
+      return;
+    }
+
+    let toastId: string | number | undefined;
     try {
-      const toastId = toast.loading(`Analyzing event ${e.record_id || e.entity}...`);
+      toastId = toast.loading(`Analyzing event ${e.record_id || e.entity}...`);
       const info = await api.eventDossier(e.kind, e.record_id || e.entity);
+      dossierCacheRef.current.set(key, info);
       toast.dismiss(toastId);
       setPanelPayload({ type: "event", info });
     } catch (err) {
+      if (toastId) toast.dismiss(toastId);
       toast.error(`Could not generate dossier for event ${e.record_id || e.entity}`);
     }
   };
@@ -184,4 +197,4 @@ export function TimelineSection() {
       )}
     </div>
   );
-}
+});

@@ -1,57 +1,100 @@
-"""FastAPI backend.
+"""FastAPI entrypoint for the financial & telecom analysis backend.
 
-Local development entrypoint:
+Production entrypoint:
 
-    python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000
+    uvicorn backend.api:app --host 0.0.0.0 --port 8000
+
+or inside the container (see Dockerfile):
+
+    python -m uvicorn backend.api:app --host $APP_API_HOST --port $APP_API_PORT
 """
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import csv
 import io
 import os
-
-# Prevent native libraries from spawning runaway threads when running inside ThreadPoolExecutor.
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
+import sys
+from pathlib import Path
 import tempfile
 import threading
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import (Depends, FastAPI, File, HTTPException, Query,
-                     UploadFile)
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+# Ensure both workspace root and backend directory are in sys.path
+_cur_dir = Path(__file__).resolve().parent
+_root_dir = _cur_dir.parent
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
+if not __package__:
+    import importlib
+    _mod = importlib.import_module("backend.api")
+    globals().update({k: v for k, v in _mod.__dict__.items() if not k.startswith("__")})
+    app = _mod.app
+else:
+    from fastapi import (
+        Depends, FastAPI, File, HTTPException, Query, UploadFile, status,
+    )
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse, StreamingResponse
+    from pydantic import BaseModel
 
-from . import auth, config, evidence, ml, risk, store, dossier, events
-from .behavioural import score_transactions
-from .fusion import (account_analysis, build_timeline, circular_flows,
-                     correlate_phones, fraud_heat, fused_table,
-                     rapid_in_out, rapid_payouts, search_bundle,
-                     cached_fraud_heat, cached_build_timeline, clear_fusion_cache)
-from .graphs import (account_phone_graph, central_phones, ego_network,
-                     money_graph, phone_call_graph, cached_money_graph,
-                     cached_account_phone_graph, cached_phone_call_graph,
-                     clear_graph_cache)
-from .pipeline import ingest_folder
-from .report import (generate_entity_str_report,
-                     generate_str_report,
-                     generate_transaction_str_report)
-from .report_intelligence import clear_report_cache
-from investigative_copilot import router as copilot_router
+    from . import auth, config, evidence, ml, risk, store, dossier, events
+    from .behavioural import score_transactions
+    from .fusion import (account_analysis, build_timeline, circular_flows,
+                         correlate_phones, fraud_heat, fused_table,
+                         rapid_in_out, rapid_payouts, search_bundle,
+                         cached_fraud_heat, cached_build_timeline, clear_fusion_cache)
+    from .graphs import (account_phone_graph, central_phones, ego_network,
+                         money_graph, phone_call_graph, cached_money_graph,
+                         cached_account_phone_graph, cached_phone_call_graph,
+                         clear_graph_cache)
+    from .pipeline import ingest_folder
+    from .report import (generate_entity_str_report,
+                         generate_str_report,
+                         generate_transaction_str_report)
+    from .report_intelligence import clear_report_cache
 
-_log = config.log
+    from investigative_copilot import router as copilot_router
+
+    _log = config.log
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start with a fresh state on every restart."""
+    """Clean startup workflow: clears stale caches, pipeline jobs and temp data if configured."""
+    _log.info("[AUTH] Storage database path resolved to: %s", store._db_path().resolve())
+    try:
+        if config.clear_on_startup():
+            store.clear_bundle()
+            with _lock:
+                _state.clear()
+            orchestrator.reset()
+            copilot_router.reset_engine()
+            risk.clear_cache()
+            risk.clear_hybrid_cache()
+            clear_fusion_cache()
+            clear_report_cache()
+            clear_graph_cache()
+            
+            # Clean orphan temp upload folders from temp directory
+            import glob, shutil
+            for tmp_folder in glob.glob(os.path.join(tempfile.gettempdir(), "backend_upload_*")):
+                try:
+                    shutil.rmtree(tmp_folder, ignore_errors=True)
+                except Exception:
+                    pass
+            _log.info("[CLEANUP] Clean startup: Purged stale datasets, previous pipeline jobs, temp files, and in-memory caches.")
+        else:
+            bundle = store.load_bundle()
+            if bundle and (bundle.get("bank") or bundle.get("cdr") or bundle.get("ipdr")):
+                with _lock:
+                    _state["bundle"] = bundle
+                copilot_router.learn_bundle(bundle)
+                orchestrator.start_pipeline(bundle)
+                _log.info("Restored persisted bundle from store on startup")
+    except Exception as e:
+        _log.warning("Failed during startup lifecycle: %s", e)
     yield
 
 
@@ -63,22 +106,78 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cors_list = config.cors_origins()
+if "*" in cors_list:
+    allow_origins_cfg = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+else:
+    allow_origins_cfg = cors_list
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.cors_origins(),
+    allow_origins=allow_origins_cfg,
+    allow_origin_regex=r"https?://.*",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 app.include_router(copilot_router.router)
 # Force reload for copilot and cache locks
-_state: dict = {}
-_pipeline: dict = {"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None, "error": None}
-_lock = threading.Lock()
+class _AutoBundleState(dict):
+    def get(self, key, default=None):
+        if key == "bundle" and not super().__contains__("bundle"):
+            try:
+                b = store.load_bundle()
+                if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
+                    super().__setitem__("bundle", b)
+                    copilot_router.learn_bundle(b)
+                    return b
+            except Exception:
+                pass
+        return super().get(key, default)
 
+    def __getitem__(self, key):
+        val = self.get(key)
+        if val is None and not super().__contains__(key):
+            raise KeyError(key)
+        return val
+
+    def __contains__(self, key):
+        if key == "bundle" and not super().__contains__("bundle"):
+            try:
+                b = store.load_bundle()
+                if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
+                    super().__setitem__("bundle", b)
+                    copilot_router.learn_bundle(b)
+                    return True
+            except Exception:
+                pass
+        return super().__contains__(key)
+
+_state = _AutoBundleState()
+if "backend.api" in sys.modules:
+    sys.modules["backend.api"]._state = _state
+if "api" in sys.modules:
+    sys.modules["api"]._state = _state
+
+from backend.orchestrator import orchestrator
+from concurrent.futures import ThreadPoolExecutor
+
+_lock = threading.Lock()
+_persist_executor = ThreadPoolExecutor(max_workers=1)
 
 def _persist() -> None:
-    pass
+    b = _state.get("bundle")
+    if b:
+        # Run serialization asynchronously in background so HTTP response returns instantly
+        _persist_executor.submit(store.save_bundle, b)
+
 
 
 class IngestRequest(BaseModel):
@@ -98,39 +197,73 @@ class IngestResponse(BaseModel):
 @app.get("/")
 def root():
     return {
-        "name": "Financial & Telecom Analysis API",
-        "version": app.version,
-        "docs": "/docs",
-        "health": "/health",
-        "status": "/ingest/status",
+        "service": "Financial & Telecom Forensic Analysis API",
+        "version": "3.0.0",
+        "status": "online",
+        "endpoints": {
+            "auth": ["/auth/login", "/auth/register", "/auth/me"],
+            "ingest": ["/ingest", "/ingest/status", "/ingest/pipeline-status", "/upload/parse-multi"],
+            "fusion": ["/summary", "/data/fused", "/data/fused.csv", "/scoring/alerts"],
+            "copilot": ["/api/v1/copilot/query", "/api/v1/copilot/stats"],
+            "docs": "/docs",
+        },
     }
 
 
 @app.get("/health")
 def health():
+    b = _state.get("bundle")
     return {
         "status": "ok",
-        "loaded": bool(_state),
+        "loaded": bool(b),
         "last_ingested": store.last_ingested(),
+        "stats": {
+            "bank": len(b.get("bank", [])) if b else 0,
+            "cdr": len(b.get("cdr", [])) if b else 0,
+            "ipdr": len(b.get("ipdr", [])) if b else 0,
+            "complaints": len(b.get("complaints", [])) if b else 0,
+        },
     }
 
 
 # ---------------------------------------------------------------- auth
+# Bearer-token authentication for analyst logins; required on all data
+# routes when auth is configured.
+
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterBody(BaseModel):
+    username: str
+    password: str
 
 
 @app.post("/auth/register")
-def auth_register(body: auth.RegisterBody):
-    """Create an account (first registered user becomes admin).
-    Wipes all loaded data so the new user starts with a clean slate."""
-    user = auth.register(body)
-    wipe_all_data(reason=f"register:{body.username}")
-    return {"detail": "user created", "user": user}
+def auth_register(body: RegisterBody):
+    if not config.allow_signup():
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "registration is disabled on this server")
+    user = auth.register(
+        auth.RegisterBody(
+            username=body.username,
+            password=body.password,
+        )
+    )
+    token = auth.issue_token(user["username"], user["role"])
+    return {"access_token": token, "token_type": "bearer", "user": user}
 
 
 @app.post("/auth/login")
-def auth_login(body: auth.LoginBody):
-    """Exchange credentials for a Bearer token."""
-    return auth.login(body)
+def auth_login(body: LoginBody):
+    return auth.login(
+        auth.LoginBody(
+            username=body.username,
+            password=body.password,
+        )
+    )
 
 
 @app.get("/auth/me")
@@ -138,29 +271,9 @@ def auth_me(user: dict = Depends(auth.require_user)):
     return {"user": user}
 
 
-def wipe_all_data(reason: str = "manual") -> None:
-    """Full data wipe: in-memory bundle, copilot DB, risk caches, and
-    persisted store on disk. Called on register and logout."""
-    with _lock:
-        _state.pop("bundle", None)
-        _state.pop("hybrid_warm", None)
-        _pipeline.update({"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None})
-    copilot_router.reset_engine()
-    risk.clear_cache()
-    risk.clear_hybrid_cache()
-    clear_fusion_cache()
-    clear_report_cache()
-    clear_graph_cache()
-    store.clear_bundle()
-    _log.info("full data wipe (%s)", reason)
-
-
 @app.post("/auth/logout")
 def auth_logout(user: dict = Depends(auth.require_user)):
-    """End the session and wipe ALL loaded data (memory + disk) so the
-    next login starts completely fresh."""
-    wipe_all_data(reason=f"logout:{user.get('username')}")
-    return {"detail": "signed out; all loaded data wiped"}
+    return {"detail": "logged out"}
 
 
 class ChangePasswordBody(BaseModel):
@@ -195,22 +308,24 @@ def ingest_status(user: dict = Depends(auth.require_user)):
 
 @app.get("/ingest/pipeline-status")
 def get_pipeline_status(user: dict = Depends(auth.require_user)):
-    return _pipeline
+    return orchestrator.get_status()
 
 
 @app.delete("/ingest")
 def ingest_clear(user: dict = Depends(auth.require_user)):
     """Drop the loaded bundle (and its persisted copy)."""
     with _lock:
-        _state.pop("bundle", None)
-        _pipeline.update({"status": "IDLE", "progress": 0, "ready": False, "dataset_id": None, "error": None})
+        if "bundle" in _state:
+            _state.pop("bundle", None)
+        dict.clear(_state)
+    store.clear_bundle()
+    orchestrator.reset()
     copilot_router.reset_engine()
     risk.clear_cache()
     risk.clear_hybrid_cache()
     clear_fusion_cache()
     clear_report_cache()
     clear_graph_cache()
-    store.clear_bundle()
     return {"cleared": True}
 
 
@@ -223,7 +338,7 @@ def ingest(req: IngestRequest, user: dict = Depends(auth.require_user)) -> Inges
     except Exception:
         raise HTTPException(400, "invalid path format")
     
-    if not str(requested_path).startswith(str(base_dir)):
+    if not requested_path.is_relative_to(base_dir):
         raise HTTPException(403, "path traversal blocked: folder must be inside data directory")
         
     if not requested_path.is_dir():
@@ -239,15 +354,11 @@ def ingest(req: IngestRequest, user: dict = Depends(auth.require_user)) -> Inges
     risk.clear_hybrid_cache()
     clear_fusion_cache()
     clear_report_cache()
+    clear_graph_cache()
     
-    import uuid
-    _pipeline["dataset_id"] = str(uuid.uuid4())
-    _pipeline["status"] = "PARSING"
-    _pipeline["progress"] = 10
-    _pipeline["ready"] = False
-    
-    _run_pipeline_background(_state["bundle"])
+    orchestrator.start_pipeline(_state["bundle"])
     b = _state["bundle"]
+
     copilot_router.learn_bundle(b)
     _log.info("ingest done: %d files ok, %d skipped, %d errors | bank=%d cdr=%d ipdr=%d",
               len(b["files"]["ok"]), len(b["files"]["skipped"]),
@@ -271,27 +382,47 @@ def _require_bundle() -> dict:
 @app.get("/summary")
 def summary(user: dict = Depends(auth.require_user)):
     b = _require_bundle()
-    heat = cached_fraud_heat(b)
+    status = orchestrator.get_status()
+    
+    if status.get("anomalies_ready") or status.get("ready"):
+        res = risk.hybrid_analyze_fast(b)
+        if not res:
+            res = risk.hybrid_analyze(b)
+        heat = res.get("accounts", {})
+        top_accs = [
+            {"account_no": a.get("account_no"), "score": a.get("risk_score", 0), "flags": a.get("flags", [])}
+            for a in heat.values() if a.get("risk_score", 0) >= 50
+        ]
+        top_accs.sort(key=lambda x: -x["score"])
+        top_accs = top_accs[:10]
+    else:
+        top_accs = []
+        
+    top_phones = []
+    
+    ent = b.get("entities", {})
+    phones_count = len(ent.get("phones", [])) if ent.get("phones") else len({str(r.get("sender_phone") or r.get("receiver_phone") or "") for r in b.get("bank", []) if r.get("sender_phone") or r.get("receiver_phone")} | {str(r.get("caller_msisdn") or r.get("recipient_msisdn") or "") for r in b.get("cdr", []) if r.get("caller_msisdn") or r.get("recipient_msisdn")} | {str(r.get("msisdn") or "") for r in b.get("ipdr", []) if r.get("msisdn")})
+    accounts_count = len(ent.get("accounts", [])) if ent.get("accounts") else len({str(r.get("account_no") or "") for r in b.get("bank", []) if r.get("account_no")})
+    upi_count = len(ent.get("upi_ids", [])) if ent.get("upi_ids") else len({str(r.get("upi_id") or "") for r in b.get("bank", []) if r.get("upi_id")})
+    imeis_count = len(ent.get("imeis", [])) if ent.get("imeis") else len({str(r.get("caller_imei") or r.get("imei") or "") for r in b.get("cdr", []) if r.get("caller_imei") or r.get("imei")})
+    ips_count = len(ent.get("ips", [])) if ent.get("ips") else len({str(r.get("source_ip") or r.get("ip") or "") for r in b.get("ipdr", []) if r.get("source_ip") or r.get("ip")})
+
     return {
-        "files": b["files"],
-        "bank_records": len(b["bank"]),
-        "cdr_records": len(b["cdr"]),
-        "ipdr_records": len(b["ipdr"]),
-        "complaints": len(b["complaints"]),
+        "bank_records": len(b.get("bank", [])),
+        "cdr_records": len(b.get("cdr", [])),
+        "ipdr_records": len(b.get("ipdr", [])),
+        "complaints": len(b.get("complaints", [])),
+        "files": b.get("files", {"ok": [], "skipped": [], "errors": []}),
         "entities": {
-            "phones": len(b["entities"]["phones"]),
-            "accounts": len(b["entities"]["accounts"]),
-            "upi_ids": len(b["entities"]["upi_ids"]),
-            "imeis": len(b["entities"]["imeis"]),
-            "imsis": len(b["entities"]["imsis"]),
-            "ips": len(b["entities"]["ips"]),
+            "phones": phones_count,
+            "accounts": accounts_count,
+            "upi_ids": upi_count,
+            "imeis": imeis_count,
+            "imsis": len(ent.get("imsis", [])),
+            "ips": ips_count,
         },
-        "top_risk_accounts": [
-            {"account_no": a["account_no"], "score": a["score"], "flags": a["flags"]}
-            for a in heat["accounts"][:10]],
-        "top_risk_phones": [
-            {"phone": p["phone"], "score": p["score"], "flags": p["flags"]}
-            for p in heat["phones"][:10]],
+        "top_risk_accounts": top_accs,
+        "top_risk_phones": top_phones,
         "last_ingested": store.last_ingested(),
     }
 
@@ -301,7 +432,24 @@ def accounts(min_score: float = 0, limit: int = Query(50, le=500),
              user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     heat = cached_fraud_heat(b)
-    out = [a for a in heat["accounts"] if a["score"] >= min_score][:limit]
+    analysis = account_analysis(b)
+    out = []
+    for a in heat["accounts"]:
+        if a["score"] < min_score:
+            continue
+        acc_no = a["account_no"]
+        st = analysis.get(acc_no, {})
+        out.append({
+            "account_no": acc_no,
+            "bank": a.get("bank", ""),
+            "txns": st.get("txns", 0),
+            "credit": st.get("credit", 0.0),
+            "debit": st.get("debit", 0.0),
+            "score": a["score"],
+            "flags": a["flags"],
+        })
+        if len(out) >= limit:
+            break
     return {"accounts": out}
 
 
@@ -364,9 +512,13 @@ def graph_ip(phone: str, user: dict = Depends(auth.require_user)):
 @app.get("/report/entity/{kind}/{value}")
 def entity_report(kind: str, value: str,
                   user: dict = Depends(auth.require_user)):
+    if kind not in ("account", "phone", "upi", "imei", "imsi", "ip", "name"):
+        raise HTTPException(400, f"unsupported entity kind: {kind}")
     b = _require_bundle()
+    import hashlib
+    safe_val = hashlib.sha256(value.encode()).hexdigest()[:16]
     path = os.path.join(tempfile.gettempdir(),
-                        f"str_entity_{kind}_{abs(hash(value)) % 100000}.pdf")
+                        f"str_entity_{kind}_{safe_val}.pdf")
     try:
         generate_entity_str_report(b, kind, value, path)
     except ValueError as e:
@@ -400,210 +552,168 @@ def timeline_event(source_type: str, event_id: str, user: dict = Depends(auth.re
     return out
 
 
+@app.get("/payouts")
+def payouts(user: dict = Depends(auth.require_user)):
+    b = _require_bundle()
+    return rapid_payouts(b)
+
+
 @app.get("/coincidence")
 def coincidence(window_sec: int = Query(3600, ge=60, le=86400),
                 limit: int = Query(100, le=1000),
                 user: dict = Depends(auth.require_user)):
     b = _require_bundle()
-    res = correlate_phones(b, window_sec=window_sec)
-    return {"window_sec": window_sec, "hits": res["hits"][:limit],
-            "total": len(res["hits"])}
-
-
-@app.get("/payouts")
-def payouts(threshold: int = Query(5, ge=1, le=100), window_min: int = Query(60, ge=1),
-            user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    return {"rapid": rapid_payouts(b, threshold, window_min),
-            "round": cached_fraud_heat(b)["round_payouts"]}
-
-
-@app.get("/account/{account_no}")
-def account_detail(account_no: str, user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    accts = account_analysis(b["bank"], b["complaints"])
-    if account_no not in accts:
-        raise HTTPException(404, "account not found")
-    txns = [r for r in b["bank"] if r.get("account_no") == account_no]
-    return {"profile": accts[account_no],
-            "txns": sorted(txns, key=lambda r: r.get("ts") or 0,
-                           reverse=True)[:200]}
-
-
-_STR_PATH = os.path.join(tempfile.gettempdir(), "str_report.pdf")
-
-
-def _str_is_fresh() -> bool:
-    if not os.path.exists(_STR_PATH):
-        return False
-    age_h = (datetime.now(timezone.utc).timestamp()
-             - os.path.getmtime(_STR_PATH)) / 3600
-    return age_h <= config.str_file_ttl_hours()
+    return correlate_phones(b, window_sec=window_sec, limit=limit)
 
 
 @app.get("/report")
 def report(user: dict = Depends(auth.require_user)):
     b = _require_bundle()
-    if not _str_is_fresh():
-        generate_str_report(b, _STR_PATH)
-    return FileResponse(_STR_PATH, media_type="application/pdf",
+    path = os.path.join(tempfile.gettempdir(), "str_report.pdf")
+    generate_str_report(b, path)
+    return FileResponse(path, media_type="application/pdf",
                         filename="STR_Report.pdf")
 
 
-@app.get("/entities")
-def entities(user: dict = Depends(auth.require_user)):
+# ---------------------------------------------------------------- investigations
+# Analyst case management: structured findings, notes and status persistence
+# backed by SQLite.
+
+
+class CreateInvestigationBody(BaseModel):
+    title: str
+    notes: str = ""
+
+
+class UpdateInvestigationBody(BaseModel):
+    title: str | None = None
+    notes: str | None = None
+    status: str | None = None
+
+
+class AddFindingBody(BaseModel):
+    kind: str
+    title: str
+    detail: str = ""
+    severity: str = "medium"
+
+
+@app.get("/investigations")
+def investigations_list(user: dict = Depends(auth.require_user)):
+    return {"investigations": store.list_investigations()}
+
+
+@app.post("/investigations")
+def investigations_create(body: CreateInvestigationBody,
+                          user: dict = Depends(auth.require_user)):
+    inv = store.create_investigation(body.title, body.notes)
+    return {"investigation": inv}
+
+
+@app.get("/investigations/{investigation_id}")
+def investigations_get(investigation_id: int,
+                       user: dict = Depends(auth.require_user)):
+    inv = store.get_investigation(investigation_id)
+    if not inv:
+        raise HTTPException(404, "investigation not found")
+    return {"investigation": inv}
+
+
+@app.patch("/investigations/{investigation_id}")
+def investigations_update(investigation_id: int, body: UpdateInvestigationBody,
+                          user: dict = Depends(auth.require_user)):
+    inv = store.update_investigation(investigation_id, title=body.title,
+                                     notes=body.notes, status=body.status)
+    if not inv:
+        raise HTTPException(404, "investigation not found")
+    return {"investigation": inv}
+
+
+@app.delete("/investigations/{investigation_id}")
+def investigations_delete(investigation_id: int,
+                          user: dict = Depends(auth.require_user)):
+    store.delete_investigation(investigation_id)
+    return {"deleted": investigation_id}
+
+
+@app.post("/investigations/{investigation_id}/findings")
+def investigations_add_finding(investigation_id: int, body: AddFindingBody,
+                               user: dict = Depends(auth.require_user)):
+    finding = store.add_finding(investigation_id, body.kind, body.title,
+                                detail=body.detail, severity=body.severity)
+    if not finding:
+        raise HTTPException(404, "investigation not found")
+    return {"finding": finding}
+
+
+@app.get("/investigations/{investigation_id}/findings")
+def investigations_list_findings(investigation_id: int,
+                                 user: dict = Depends(auth.require_user)):
+    return {"findings": store.list_findings(investigation_id)}
+
+
+@app.get("/investigations/{investigation_id}/tree")
+def investigations_tree(investigation_id: int,
+                        user: dict = Depends(auth.require_user)):
+    """Investigation tree: returns the case with its findings plus any
+    flagged transactions, linked phones, and evidence chains associated
+    with the investigation's subject accounts."""
+    inv = store.get_investigation(investigation_id)
+    if not inv:
+        raise HTTPException(404, "investigation not found")
     b = _require_bundle()
-    return b["entities"]
+    scored = risk.cached_transaction_risk(b)
+    # Find transactions related to findings
+    finding_titles = {f["title"].lower() for f in inv.get("findings", [])}
+    flagged = []
+    for s in scored:
+        acc = (s.get("account_no") or "").lower()
+        tid = (s.get("transaction_id") or "").lower()
+        if any(acc and acc in t for t in finding_titles) or any(tid and tid in t for t in finding_titles):
+            flagged.append({
+                "transaction_id": s.get("transaction_id"),
+                "risk_score": s.get("risk_score", 0),
+                "risk_band": s.get("risk_band", "LOW"),
+                "rules_fired": s.get("rules_fired", []),
+                "evidence": s.get("evidence", []),
+                "receiver_account": s.get("receiver_account"),
+            })
+    return {
+        "investigation": inv,
+        "findings": inv.get("findings", []),
+        "flagged_transactions": flagged,
+    }
 
 
 # ---------------------------------------------------------------- hybrid engine
-# Hybrid Multi-Stage Fraud Detection Engine (ERH26_PS_03): rules + ML
-# ensemble + behavioural profiling + temporal windows + telecom/internet
-# correlation + money-flow N-hop + entity risk + named scenario detection,
-# fused through configurable weights with full explainability.
-# The engine runs once per bundle and caches; ingest/restore trigger a
-# background warm-up so the first UI request is fast.
+# Master-prompt Section II compliance: exposes hybrid composite scoring,
+# per-model component breakdown, explainability and weight inspection.
 
 
-def _run_pipeline_background(bundle: dict) -> None:
-    def _run() -> None:
-        try:
-            from backend.fusion import cached_fused_base, cached_build_timeline
-            from backend.graphs import cached_money_graph, cached_account_phone_graph, cached_phone_call_graph
-            import backend.risk.hybrid as hybrid
-            
-            _pipeline["status"] = "FUSING"
-            _pipeline["progress"] = 25
-            cached_fused_base(bundle)
-            cached_build_timeline(bundle)
-            
-            # Fused data is ready — page can now render without waiting for ML
-            _pipeline["status"] = "FUSED_READY"
-            _pipeline["progress"] = 40
-            
-            _pipeline["status"] = "SCORING"
-            _pipeline["progress"] = 50
-            hybrid.hybrid_analyze(bundle)
-            
-            _pipeline["status"] = "GRAPHS"
-            _pipeline["progress"] = 85
-            cached_money_graph(bundle)
-            cached_account_phone_graph(bundle)
-            cached_phone_call_graph(bundle)
-            
-            _pipeline["status"] = "READY"
-            _pipeline["progress"] = 100
-            _pipeline["ready"] = True
-            
-            _state["hybrid_warm"] = True
-            _log.info("hybrid engine warmed (%d txns)", len(bundle.get("bank", [])))
-        except Exception as exc:
-            _state["hybrid_warm"] = False
-            _pipeline["status"] = "ERROR"
-            _pipeline["ready"] = False
-            _pipeline["error"] = str(exc)
-            _log.exception("hybrid engine warm-up failed")
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    return
-
-
-def _enrich_txn_row(row: dict, bank_by_id: dict) -> dict:
-    """Attach customer name + phone to a hybrid transaction row."""
-    rec = bank_by_id.get(row.get("transaction_id") or "", {})
-    row = dict(row)
-    row["customer_name"] = rec.get("account_name") or rec.get("customer_name") or ""
-    row["customer_phone"] = rec.get("sender_phone") or rec.get("customer_phone") or ""
-    return row
+@app.get("/hybrid/analyze")
+def hybrid_analyze(user: dict = Depends(auth.require_user)):
+    """Full hybrid analysis payload across transactions, accounts, entities."""
+    return risk.hybrid_analyze(_require_bundle())
 
 
 @app.get("/hybrid/transactions")
 def hybrid_transactions(min_score: float = Query(0, ge=0, le=100),
-                        limit: int = Query(50, le=1000),
-                        band: str = Query("", pattern="^(SAFE|LOW|MEDIUM|HIGH|CRITICAL)?$"),
+                        limit: int = Query(50, le=500),
                         user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    scored = risk.hybrid_transaction_risk(b)
-    if scored is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
-    bank_by_id = {r.get("txn_id"): r for r in b.get("bank", [])}
-    results = []
-    for s in scored:
-        if s["risk_score"] < min_score:
-            continue
-        if band and s["risk_band"] != band:
-            continue
-        results.append(_enrich_txn_row({
-            "transaction_id": s.get("transaction_id"),
-            "account_no": s.get("account_no"),
-            "amount": s.get("amount"),
-            "mode": s.get("mode"),
-            "customer_id": s.get("sender_customer_id"),
-            "risk_score": s["risk_score"],
-            "risk_band": s["risk_band"],
-            "rules_fired": s.get("rules_fired", []),
-            "breakdown": s.get("breakdown", []),
-            "evidence": s.get("evidence", []),
-            "hybrid_components": s.get("hybrid_components", {}),
-            "models_fired": s.get("models_fired", []),
-            "scenarios": s.get("scenarios", []),
-            "confidence": s.get("confidence"),
-        }, bank_by_id))
-        if len(results) >= limit:
-            break
-    return {"results": results, "total": len(results)}
+    rows = risk.hybrid_transaction_risk(_require_bundle(), min_score=min_score)
+    return {"transactions": rows[:limit], "total": len(rows)}
 
 
 @app.get("/hybrid/accounts")
-def hybrid_accounts(min_score: float = Query(0, ge=0, le=100),
-                    limit: int = Query(50, le=500),
-                    user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    res = risk.hybrid_account_risk(b)
-    if res is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
-    accounts = [a for a in res
-                if a["risk_score"] >= min_score][:limit]
-    return {"accounts": accounts, "total": len(accounts)}
+def hybrid_accounts(user: dict = Depends(auth.require_user)):
+    rows = risk.hybrid_account_risk(_require_bundle())
+    return {"accounts": rows, "total": len(rows)}
 
 
 @app.get("/hybrid/entities")
-def hybrid_entities(min_score: float = Query(0, ge=0, le=100),
-                    limit: int = Query(50, le=500),
-                    user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    res = risk.hybrid_entity_risk(b)
-    if res is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
-    entities = [e for e in res
-                if e["risk_score"] >= min_score][:limit]
-    return {"entities": entities, "total": len(entities)}
-
-
-@app.get("/hybrid/scenarios")
-def hybrid_scenarios(limit: int = Query(20, le=100),
-                     user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    res = risk.hybrid_analyze(b, block=False)
-    if res is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
-    scen = res["scenarios"]
-    return {"stats": scen["stats"],
-            "moneyflow": scen["moneyflow"]["stats"],
-            "entity": {k: v for k, v in res["entity_risk"]["stats"].items()},
-            "top": scen["stats"]["top_scenarios"][:limit]}
-
-
-@app.get("/hybrid/stats")
-def hybrid_stats(user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    res = risk.hybrid_analyze(b, block=False)
-    if res is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
-    return {"stats": res["stats"],
-            "scenarios": res["scenarios"]["stats"],
-            "weights": risk.hybrid_weights()}
+def hybrid_entities(user: dict = Depends(auth.require_user)):
+    rows = risk.hybrid_entity_risk(_require_bundle())
+    return {"entities": rows, "total": len(rows)}
 
 
 @app.get("/hybrid/explain/transaction/{transaction_id}")
@@ -611,8 +721,6 @@ def hybrid_explain_transaction(transaction_id: str,
                                user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     out = risk.explanations_for_txn(b, transaction_id)
-    if out is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     if not out:
         raise HTTPException(404, "transaction not found")
     return {"explanation": out}
@@ -620,11 +728,9 @@ def hybrid_explain_transaction(transaction_id: str,
 
 @app.get("/hybrid/explain/account/{account_no}")
 def hybrid_explain_account(account_no: str,
-                           user: dict = Depends(auth.require_user)):
+                            user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     out = risk.explanations_for_account(b, account_no)
-    if out is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     if not out:
         raise HTTPException(404, "account not found")
     return {"explanation": out}
@@ -635,8 +741,6 @@ def hybrid_explain_entity(kind: str, entity: str,
                           user: dict = Depends(auth.require_user)):
     b = _require_bundle()
     out = risk.explanations_for_entity(b, kind, entity)
-    if out is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
     if not out:
         raise HTTPException(404, "entity not found")
     return {"explanation": out}
@@ -734,8 +838,10 @@ def loading_status(user: dict = Depends(auth.require_user)):
 def transaction_report(transaction_id: str,
                        user: dict = Depends(auth.require_user)):
     b = _require_bundle()
+    import hashlib
+    safe_id = hashlib.sha256(transaction_id.encode()).hexdigest()[:16]
     path = os.path.join(tempfile.gettempdir(),
-                        f"str_transaction_{transaction_id}.pdf")
+                        f"str_transaction_{safe_id}.pdf")
     try:
         generate_transaction_str_report(b, transaction_id, path)
     except ValueError:
@@ -754,7 +860,7 @@ def reports_intelligence(user: dict = Depends(auth.require_user)):
     computed from the loaded bundle by the fusion, graph, ML, timeline and
     rule engines — nothing is fabricated.
     """
-    from .report_intelligence import report_intelligence
+    from backend.report_intelligence import report_intelligence
     return report_intelligence(_require_bundle())
 
 
@@ -813,6 +919,59 @@ def flows_patterns(min_amount: float = Query(10000, ge=0),
     }
 
 
+@app.get("/payouts")
+def payouts_endpoint(user: dict = Depends(auth.require_user)):
+    """Rapid bursts and round-trip payouts detection."""
+    b = _require_bundle()
+    bank = b.get("bank") or []
+    rapid = []
+    round_payouts = []
+
+    for r in bank:
+        amt = float(r.get("debit") or r.get("amount") or 0.0)
+        if amt > 0 and amt >= 1000 and amt % 1000 == 0:
+            round_payouts.append({
+                "txn_id": r.get("txn_id") or "",
+                "account_no": r.get("account_no") or "",
+                "amount": amt,
+                "date": r.get("date") or "",
+                "time": r.get("time") or "",
+                "mode": r.get("mode") or "",
+                "narration": r.get("narration") or "",
+            })
+
+    by_acc: dict[str, list] = {}
+    for r in bank:
+        acc = r.get("account_no")
+        if not acc:
+            continue
+        amt = float(r.get("debit") or 0.0)
+        if amt > 0:
+            ts = float(r.get("ts") or 0.0)
+            by_acc.setdefault(acc, []).append((ts, r))
+
+    for acc, txns in by_acc.items():
+        if len(txns) >= 3:
+            txns.sort(key=lambda x: x[0])
+            for i in range(len(txns) - 2):
+                w_start = txns[i][0]
+                w_txns = [t for t in txns[i:] if t[0] - w_start <= 3600]
+                if len(w_txns) >= 3:
+                    rapid.append({
+                        "account_no": acc,
+                        "count": len(w_txns),
+                        "window_min": 60,
+                        "first": w_txns[0][1].get("time") or w_txns[0][1].get("date") or "",
+                        "last": w_txns[-1][1].get("time") or w_txns[-1][1].get("date") or "",
+                    })
+                    break
+
+    return {
+        "rapid": rapid,
+        "round": round_payouts[:100],
+    }
+
+
 @app.get("/ml/outliers")
 def ml_outliers_endpoint(contamination: float = Query(0.05, gt=0, le=0.5),
                          min_txns: int = Query(5, ge=1),
@@ -839,6 +998,7 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
                              user: dict = Depends(auth.require_user)):
     if not files:
         raise HTTPException(400, "no files uploaded")
+
     tmp = tempfile.mkdtemp(prefix="backend_upload_")
     names: list[str] = []
     for f in files:
@@ -859,15 +1019,11 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
     risk.clear_hybrid_cache()
     clear_fusion_cache()
     clear_report_cache()
+    clear_graph_cache()
     
-    import uuid
-    _pipeline["dataset_id"] = str(uuid.uuid4())
-    _pipeline["status"] = "PARSING"
-    _pipeline["progress"] = 10
-    _pipeline["ready"] = False
-    
-    _run_pipeline_background(_state["bundle"])
+    orchestrator.start_pipeline(_state["bundle"])
     b = _state["bundle"]
+    copilot_router.learn_bundle(b)
     return {
         "detail": "fusion complete",
         "files": [{"name": n} for n in b["files"]["ok"]]
@@ -877,6 +1033,7 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
         "bank": len(b["bank"]), "cdr": len(b["cdr"]), "ipdr": len(b["ipdr"]),
         "complaints": len(b["complaints"]),
     }
+
 
 
 @app.get("/scoring/alerts")
@@ -892,14 +1049,39 @@ def scoring_alerts(min_risk: float = Query(50, ge=0, le=100),
     b = _require_bundle()
     if not b.get("bank"):
         return {"results": [], "total": 0}
+        
+    status = orchestrator.get_status()
+    if not status.get("anomalies_ready") and status.get("status") in ("PARSING", "FUSING", "SCORING") and status.get("dataset_id"):
+        raise HTTPException(425, "Anomaly detection engine is still warming up.")
+        
     ncrp_accounts = {str(c.get("account_no") or "").strip()
                      for c in b.get("complaints", [])}
     ncrp_accounts.discard("")
     bank_by_id = {r.get("txn_id"): r for r in b.get("bank", [])}
+    acc_to_name = {}
+    for acc in b.get("accounts", []):
+        a_no = str(acc.get("account_no") or "").strip()
+        a_name = acc.get("holder") or acc.get("account_name") or acc.get("customer_name") or ""
+        if a_no and a_name:
+            acc_to_name[a_no] = a_name
+    for r in b.get("bank", []):
+        a_no = str(r.get("account_no") or "").strip()
+        a_name = r.get("account_name") or r.get("holder") or r.get("customer_name") or ""
+        if a_no and a_name and a_no not in acc_to_name:
+            acc_to_name[a_no] = a_name
+
     res = risk.hybrid_analyze_fast(b)
     if res is None:
-        raise HTTPException(425, "Anomaly detection engine is still warming up.")
-    scored_sorted = res["transactions_sorted"]
+        if status.get("anomalies_ready") or status.get("ready"):
+            res = risk.hybrid_analyze(b)
+        else:
+            raise HTTPException(425, "Anomaly detection engine is still warming up.")
+
+    scored_sorted = res.get("sorted_transactions")
+    if not scored_sorted:
+        scored_sorted = list(res["transactions"].values())
+        scored_sorted.sort(key=lambda r: (-r.get("risk_score", 0.0), r.get("risk_band", "")))
+    from backend.explain import plain_reason
     results = []
     for orig_s in scored_sorted:
         is_ncrp = orig_s.get("account_no") in ncrp_accounts
@@ -924,7 +1106,8 @@ def scoring_alerts(min_risk: float = Query(50, ge=0, le=100),
             continue
         row = _enrich_txn_row({
             "transaction_id": s.get("txn_id") or s.get("transaction_id") or "",
-            "sender_customer_id": s.get("sender_phone") or s.get("sender_customer_id") or "",
+            "account_no": s.get("account_no") or "",
+            "sender_customer_id": s.get("sender_phone") or s.get("sender_customer_id") or s.get("account_no") or "",
             "amount_usd": s.get("debit") or s.get("credit") or s.get("amount") or 0.0,
             "date": s.get("date", ""),
             "time": s.get("time", ""),
@@ -938,8 +1121,7 @@ def scoring_alerts(min_risk: float = Query(50, ge=0, le=100),
             "mode": s.get("mode", ""),
             "bank": s.get("bank", ""),
             "ncrp_states": [],
-        }, bank_by_id)
-        from .explain import plain_reason
+        }, bank_by_id, acc_to_name)
         row["explain_plain"] = plain_reason(
             s.get("rules_fired") or s.get("models_fired") or [],
             s.get("breakdown") or s.get("scenarios"),
@@ -969,6 +1151,9 @@ _score_cache_lock = threading.Lock()
 @app.get("/data/fused")
 def fused_data(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=1000),
                q: str = Query(""), account: str = Query(""), mode: str = Query(""),
+               date_start: str = Query(""), date_end: str = Query(""),
+               min_amount: float = Query(0.0, ge=0), max_amount: float = Query(0.0, ge=0),
+               risk_band: str = Query(""),
                risk_annotate: int = Query(0, ge=0, le=1),
                user: dict = Depends(auth.require_user)):
     """Fused bank x CDR x IPDR preview table (the post-ingestion fusion view).
@@ -977,24 +1162,37 @@ def fused_data(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=10
     (expensive on large bundles — runs the full scoring engine once).
     """
     b = _require_bundle()
-    if _pipeline.get("status") in ("PARSING", "FUSING") and _pipeline.get("dataset_id"):
-        raise HTTPException(425, "Fusion dataset is being prepared.")
     scored = None
     if risk_annotate:
         res = risk.hybrid_analyze_fast(b)
         if res:
-            scored = res["transactions"]
+            scored = res.get("transactions")
     return fused_table(b, offset=offset, limit=limit, q=q,
-                       account=account, mode=mode, scored=scored)
+                       account=account, mode=mode, scored=scored,
+                       date_start=date_start, date_end=date_end,
+                       min_amount=min_amount, max_amount=max_amount, risk_band=risk_band)
+
 
 
 @app.get("/data/fused.csv")
 def fused_data_csv(q: str = Query(""), account: str = Query(""), mode: str = Query(""),
+                   date_start: str = Query(""), date_end: str = Query(""),
+                   min_amount: float = Query(0.0, ge=0), max_amount: float = Query(0.0, ge=0),
+                   risk_band: str = Query(""),
                    max_rows: int = Query(50000, ge=1, le=200000),
                    user: dict = Depends(auth.require_user)):
     """Download the fused dataset as CSV (the 'fused CSV' export)."""
     b = _require_bundle()
-    page = fused_table(b, offset=0, limit=max_rows, q=q, account=account, mode=mode)
+    # Apply scored if risk_band is specified
+    scored = None
+    if risk_band and risk_band.lower() != "all":
+        res = risk.hybrid_analyze_fast(b)
+        if res:
+            scored = res.get("transactions")
+            
+    page = fused_table(b, offset=0, limit=max_rows, q=q, account=account, mode=mode,
+                       scored=scored, date_start=date_start, date_end=date_end,
+                       min_amount=min_amount, max_amount=max_amount, risk_band=risk_band)
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=_FUSED_CSV_COLUMNS,
                             extrasaction="ignore")
@@ -1007,6 +1205,41 @@ def fused_data_csv(q: str = Query(""), account: str = Query(""), mode: str = Que
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="fused_data.csv"'},
     )
+
+
+def _enrich_txn_row(row: dict, bank_by_id: dict, acc_to_name: dict = None) -> dict:
+    tid = row.get("transaction_id") or row.get("txn_id") or ""
+    raw = bank_by_id.get(tid, {})
+    acc_no = str(row.get("account_no") or raw.get("account_no") or "").strip()
+
+    name = (
+        row.get("customer_name")
+        or raw.get("customer_name")
+        or raw.get("account_name")
+        or raw.get("holder")
+        or (acc_to_name.get(acc_no) if acc_to_name else "")
+        or raw.get("counterparty_name")
+        or raw.get("merchant_name")
+        or ""
+    )
+    phone = (
+        row.get("customer_phone")
+        or raw.get("customer_phone")
+        or raw.get("sender_phone")
+        or raw.get("phone")
+        or row.get("sender_customer_id")
+        or ""
+    )
+    return {
+        **row,
+        "date": row.get("date") or raw.get("date") or "",
+        "time": row.get("time") or raw.get("time") or "",
+        "mode": row.get("mode") or raw.get("mode") or "",
+        "bank": row.get("bank") or raw.get("bank") or "",
+        "customer_name": name,
+        "account_name": name,
+        "customer_phone": phone,
+    }
 
 
 # ---------------------------------------------------------------- analysis
@@ -1028,7 +1261,7 @@ class RelationshipBody(BaseModel):
 def analysis_heatmap(body: HeatmapBody,
                      user: dict = Depends(auth.require_user)):
     """Account × hour-of-day activity heatmap over the fused bank corpus."""
-    from .analysis import account_hour_heatmap
+    from backend.analysis import account_hour_heatmap
     b = _require_bundle()
     return account_hour_heatmap(b, account=body.account or "",
                                 max_accounts=max(1, min(60, body.max_accounts)))
@@ -1039,7 +1272,7 @@ def analysis_relationship(body: RelationshipBody,
                           user: dict = Depends(auth.require_user)):
     """Relationship model between the selected transactions: money-flow legs,
     shared accounts/phones, time proximity — with edge strength + reasons."""
-    from .analysis import relationship_model
+    from backend.analysis import relationship_model
     b = _require_bundle()
     ids = [str(t) for t in body.transaction_ids if t][:500]
     if not ids:

@@ -137,6 +137,8 @@ def phone_network(bundle: dict) -> dict:
     return out
 
 
+_TELECOM_SCORES_CACHE = {}
+
 def telecom_scores(bundle: dict, window_sec: int = _WINDOW) -> dict:
     """Aggregated telecom intelligence.
 
@@ -144,12 +146,18 @@ def telecom_scores(bundle: dict, window_sec: int = _WINDOW) -> dict:
              phone: {phone: {network_score, degree, ...}},
              stats: {...}}
     """
+    key = (id(bundle), window_sec)
+    if key in _TELECOM_SCORES_CACHE:
+        return _TELECOM_SCORES_CACHE[key]
+        
     txn = txn_call_assist(bundle, window_sec)
     phones = phone_network(bundle)
     n_contacts = len(set(_index(bundle)["contacts"]))
-    return {
+    out = {
         "txn": txn,
         "phone": phones,
         "stats": {"phones_with_network": len(phones),
                   "contact_pairs": n_contacts},
     }
+    _TELECOM_SCORES_CACHE[key] = out
+    return out

@@ -40,25 +40,44 @@ const answerText = (r: CopilotQueryResult) =>
   r.answer ?? r.general_answer ?? r.executive_summary ?? "Query processed.";
 
 const pickEntity = (res: CopilotQueryResult, query: string): string => {
+  if (query) {
+    const txnMatch = query.match(/\bTXN[A-Z0-9]{4,}\b/i);
+    if (txnMatch) return txnMatch[0].toUpperCase();
+    
+    const phoneMatch = query.match(/\b(?:91)?[6-9]\d{9}\b/);
+    if (phoneMatch) return phoneMatch[0];
+    
+    const accMatch = query.match(/\b\d{8,18}\b/);
+    if (accMatch) return accMatch[0];
+  }
+
   for (const cand of [
+    res.entity_resolution?.entity_id,
     res.graph_traversal?.root,
     res.graph_traversal?.entity_id,
     res.graph_traversal?.start_node,
     res.linking_tree?.root,
     res.linking_tree?.entity_id,
     res.linking_tree?.start_node,
-    res.entity_resolution?.entity_id,
   ]) {
-    if (cand && cand !== "none" && cand !== "unknown") return cand;
+    if (cand && cand !== "none" && cand !== "unknown") return String(cand);
   }
-  const m = query.match(/\bTXN[A-Z0-9]{6,}\b|\b\d{10}\b/i);
-  if (m) return m[0];
-  const txn = res.records?.[0]?.transaction_id;
-  return typeof txn === "string" ? txn : "";
+
+  if (res.records && res.records.length > 0) {
+    for (const r of res.records) {
+      const cand = r.transaction_id || r.sender_account_number || r.receiver_account_number || r.a_party_number || r.b_party_number || (r as any).account_no || (r as any).phone;
+      if (cand && String(cand) !== "unknown" && String(cand) !== "none") {
+        return String(cand);
+      }
+    }
+  }
+
+  return "";
 };
 
 export function OmniWidget() {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const lastUserQueryRef = useRef<string>("");
 
   const pathname = usePathname();
   const [isIngested, setIsIngested] = useState(false);
@@ -113,7 +132,7 @@ export function OmniWidget() {
   const [lastExtractedEntity, setLastExtractedEntity] = useState("");
 
   const openTree = useCallback((res: CopilotQueryResult, entityOverride?: string) => {
-    const entity = entityOverride || lastExtractedEntity || pickEntity(res, "");
+    const entity = entityOverride || pickEntity(res, lastUserQueryRef.current) || lastExtractedEntity;
     if (!entity) {
       setTreeEntity("");
     } else {
@@ -123,8 +142,6 @@ export function OmniWidget() {
     setGlobe(true);
   }, [lastExtractedEntity]);
 
-
-
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, result, tab]);
@@ -132,6 +149,7 @@ export function OmniWidget() {
   const send = useCallback(async (text: string) => {
     const clean = text.trim();
     if (!clean || busy) return;
+    lastUserQueryRef.current = clean;
     setDraft("");
     setBusy(true);
     setResult(null);
