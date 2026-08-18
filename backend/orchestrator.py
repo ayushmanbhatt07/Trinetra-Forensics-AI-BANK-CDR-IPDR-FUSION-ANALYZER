@@ -14,28 +14,35 @@ class PipelineOrchestrator:
     def __init__(self):
         self._lock = threading.Lock()
         # Single bounded executor to prevent spawning multiple threads or processing simultaneously.
-        self._executor = ThreadPoolExecutor(max_workers=1)
-        self._active_job = None
-        self._load_active_job()
+        self._executor = ThreadPoolExecutor(max_workers=4) # Increased to handle multiple users
+        self._active_jobs = {} # Map username to active job
 
-    def _load_active_job(self):
-        job = store.get_active_pipeline_job()
+    def _get_or_load_active_job(self, username: str) -> dict | None:
+        if username in self._active_jobs:
+            job = self._active_jobs[username]
+            if job and job["status"] not in ("READY", "ERROR", "CANCELLED"):
+                return job
+                
+        job = store.get_active_pipeline_job(username)
         if job and job["status"] not in ("READY", "ERROR", "CANCELLED"):
             # If the server restarted during processing, transition it to ERROR or CANCELLED
             # because we cannot magically resume ThreadPoolExecutor jobs after a crash.
             job["status"] = "ERROR"
             job["error_message"] = "Server restarted during processing. Job cancelled."
-            store.save_pipeline_job(job)
-            self._active_job = job
+            store.save_pipeline_job(job, username)
+            self._active_jobs[username] = job
         else:
-            self._active_job = job
+            self._active_jobs[username] = job
+            
+        return self._active_jobs[username]
 
-    def start_pipeline(self, bundle: dict) -> dict:
+    def start_pipeline(self, bundle: dict, username: str) -> dict:
         """Initialize the pipeline job, persist it, and submit the background task."""
         with self._lock:
+            active_job = self._get_or_load_active_job(username)
             # Check if there's already an active job running to prevent concurrent dupes
-            if self._active_job and self._active_job["status"] not in ("READY", "ERROR", "CANCELLED"):
-                return self._active_job
+            if active_job and active_job["status"] not in ("READY", "ERROR", "CANCELLED"):
+                return active_job
 
             dataset_id = str(uuid.uuid4())
             job_id = f"job-{dataset_id}"
@@ -54,27 +61,31 @@ class PipelineOrchestrator:
                 "anomalies_ready": False,
                 "graphs_ready": False
             }
-            self._active_job = job
-            store.save_pipeline_job(job)
-            self._executor.submit(self._run_pipeline, bundle, job_id)
+            self._active_jobs[username] = job
+            store.save_pipeline_job(job, username)
+            self._executor.submit(self._run_pipeline, bundle, job_id, username)
             return job
             
-    def reset(self):
+    def reset(self, username: str):
         with self._lock:
-            if self._active_job and self._active_job["status"] not in ("READY", "ERROR", "CANCELLED"):
-                self._active_job["status"] = "CANCELLED"
-                self._active_job["error_message"] = "Job cancelled due to session reset."
-                store.save_pipeline_job(self._active_job)
-            self._active_job = None
+            active_job = self._active_jobs.get(username)
+            if active_job and active_job["status"] not in ("READY", "ERROR", "CANCELLED"):
+                active_job["status"] = "CANCELLED"
+                active_job["error_message"] = "Job cancelled due to session reset."
+                store.save_pipeline_job(active_job, username)
+            self._active_jobs[username] = None
 
-    def get_status(self) -> dict:
+    def get_status(self, username: str) -> dict:
         """Returns the current pipeline status with per-stage result availability."""
         from .api import _state
-        b = _state.get("bundle")
+        user_state = _state.get(username, {})
+        b = user_state.get("bundle")
         has_bundle = b is not None and bool(b.get("bank") or b.get("cdr") or b.get("ipdr"))
         
         with self._lock:
-            if not self._active_job:
+            active_job = self._get_or_load_active_job(username)
+            
+            if not active_job:
                 return {
                     "job_id": None,
                     "dataset_id": "restored_session" if has_bundle else None,
@@ -96,7 +107,7 @@ class PipelineOrchestrator:
                     }
                 }
             
-            job = self._active_job.copy()
+            job = active_job.copy()
             
             # If a bundle is successfully loaded into memory, the data is available for the UI
             # even if the last tracked pipeline job was cancelled or errored out.
@@ -154,15 +165,16 @@ class PipelineOrchestrator:
             }
 
 
-    def _update_job(self, job_id: str, updates: dict):
+    def _update_job(self, job_id: str, username: str, updates: dict):
         with self._lock:
-            if self._active_job and self._active_job["job_id"] == job_id:
+            job = self._active_jobs.get(username)
+            if job and job["job_id"] == job_id:
                 now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                self._active_job.update(updates)
-                self._active_job["updated_at"] = now
-                store.save_pipeline_job(self._active_job)
+                job.update(updates)
+                job["updated_at"] = now
+                store.save_pipeline_job(job, username)
 
-    def _run_pipeline(self, bundle: dict, job_id: str):
+    def _run_pipeline(self, bundle: dict, job_id: str, username: str):
         """The actual background processing stage machine."""
         t0 = time.time()
         try:
@@ -171,12 +183,12 @@ class PipelineOrchestrator:
             from backend.graphs import cached_money_graph, cached_account_phone_graph, cached_phone_call_graph
             import backend.risk.hybrid as hybrid
             
-            self._update_job(job_id, {
+            self._update_job(job_id, username, {
                 "status": "FUSING",
                 "stage": "FUSING",
                 "progress": 25
             })
-            _log.info(f"[PIPELINE] job={job_id} stage=FUSING (Starting concurrent Fusion & Scoring)")
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=FUSING (Starting concurrent Fusion & Scoring)")
             
             from concurrent.futures import ThreadPoolExecutor
             
@@ -193,39 +205,39 @@ class PipelineOrchestrator:
                 
                 # Step 1: Wait for Fusion to finish first (so UI can show fused data)
                 fut_fuse.result()
-                self._update_job(job_id, {
+                self._update_job(job_id, username, {
                     "status": "FUSED_READY",
                     "stage": "FUSED_READY",
                     "progress": 40,
                     "fused_ready": True
                 })
-                _log.info(f"[PIPELINE] job={job_id} stage=FUSED_READY elapsed={time.time() - t0:.2f}s")
+                _log.info(f"[PIPELINE] user={username} job={job_id} stage=FUSED_READY elapsed={time.time() - t0:.2f}s")
                 
                 # Step 2: Now wait for Scoring (which has been running in parallel)
-                self._update_job(job_id, {
+                self._update_job(job_id, username, {
                     "status": "SCORING",
                     "stage": "SCORING",
                     "progress": 50
                 })
-                _log.info(f"[PIPELINE] job={job_id} stage=SCORING (waiting for parallel execution)")
+                _log.info(f"[PIPELINE] user={username} job={job_id} stage=SCORING (waiting for parallel execution)")
                 
                 fut_score.result()
             
-            self._update_job(job_id, {
+            self._update_job(job_id, username, {
                 "status": "ANOMALIES_READY",
                 "stage": "ANOMALIES_READY",
                 "progress": 75,
                 "anomalies_ready": True
             })
-            _log.info(f"[PIPELINE] job={job_id} stage=ANOMALIES_READY elapsed={time.time() - t0:.2f}s")
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=ANOMALIES_READY elapsed={time.time() - t0:.2f}s")
             
             # Step 3: Graphs
-            self._update_job(job_id, {
+            self._update_job(job_id, username, {
                 "status": "GRAPHS",
                 "stage": "GRAPHS",
                 "progress": 85
             })
-            _log.info(f"[PIPELINE] job={job_id} stage=GRAPHS")
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=GRAPHS")
             
             cached_money_graph(bundle)
             cached_account_phone_graph(bundle)
@@ -233,19 +245,19 @@ class PipelineOrchestrator:
             
             # Final Step: Ready
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            self._update_job(job_id, {
+            self._update_job(job_id, username, {
                 "status": "READY",
                 "stage": "READY",
                 "progress": 100,
                 "graphs_ready": True,
                 "completed_at": now
             })
-            _log.info(f"[PIPELINE] job={job_id} stage=READY total_elapsed={time.time() - t0:.2f}s")
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=READY total_elapsed={time.time() - t0:.2f}s")
             
         except Exception as e:
-            _log.exception(f"[PIPELINE] job={job_id} ERROR: {e}")
+            _log.exception(f"[PIPELINE] user={username} job={job_id} ERROR: {e}")
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            self._update_job(job_id, {
+            self._update_job(job_id, username, {
                 "status": "ERROR",
                 "stage": "ERROR",
                 "error_message": str(e),

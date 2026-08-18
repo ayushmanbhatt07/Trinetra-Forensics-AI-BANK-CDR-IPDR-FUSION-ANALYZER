@@ -17,37 +17,40 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/copilot", tags=["Investigative Co-Pilot"])
 
 # Lazy engine initialization, rebuilt whenever the loaded bundle changes.
-_engine: Optional[InvestigativeCoPilotEngine] = None
-_engine_bundle: Optional[Dict[str, Any]] = None
+_engines: Dict[str, InvestigativeCoPilotEngine] = {}
+_engine_bundles: Dict[str, Dict[str, Any]] = {}
 _last_call_meta: Dict[str, Any] = {}
 
 
-def _current_bundle() -> Optional[Dict[str, Any]]:
+def _current_bundle(username: str) -> Optional[Dict[str, Any]]:
     import sys
     for mod_name in ("api", "backend.api"):
         if mod_name in sys.modules:
             mod = sys.modules[mod_name]
             if hasattr(mod, "_state"):
-                b = getattr(mod, "_state", {}).get("bundle")
+                user_state = getattr(mod, "_state", {}).get(username, {})
+                b = user_state.get("bundle")
                 if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
                     return b
     try:
         from backend import store
-        return store.load_bundle()
+        return store.load_bundle(username)
     except Exception:
         return None
 
 
-def reset_engine() -> None:
-    """Drops the cached engine + copilot DB; next request rebuilds from the
-    currently loaded bundle. Called by the API on ingest / clear / restore."""
-    global _engine, _engine_bundle
-    _engine = None
-    _engine_bundle = None
+def reset_engine(username: str = None) -> None:
+    global _engines, _engine_bundles
+    if username:
+        _engines.pop(username, None)
+        _engine_bundles.pop(username, None)
+    else:
+        _engines.clear()
+        _engine_bundles.clear()
     reset_copilot_db()
 
 
-def learn_bundle(bundle: Dict[str, Any]) -> None:
+def learn_bundle(bundle: Dict[str, Any], username: str = None) -> None:
     """Continuous-learning hook: refresh the memory digest whenever a dataset
     is ingested or restored, so the LLM always reasons on the latest corpus
     (entity census, top accounts, phone overlap, digest fingerprint)."""
@@ -61,19 +64,19 @@ def learn_bundle(bundle: Dict[str, Any]) -> None:
         logger.error("copilot memory refresh failed: %s", e)
 
 
-def get_engine() -> InvestigativeCoPilotEngine:
-    global _engine, _engine_bundle
-    bundle = _current_bundle()
+def get_engine(username: str) -> InvestigativeCoPilotEngine:
+    global _engines, _engine_bundles
+    bundle = _current_bundle(username)
     if bundle is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="no data loaded; POST /ingest first"
         )
-    if _engine is None or _engine_bundle is not bundle:
-        _engine = InvestigativeCoPilotEngine(conn=get_copilot_db(bundle),
+    if username not in _engines or _engine_bundles.get(username) is not bundle:
+        _engines[username] = InvestigativeCoPilotEngine(conn=get_copilot_db(bundle),
                                              bundle=bundle)
-        _engine_bundle = bundle
-    return _engine
+        _engine_bundles[username] = bundle
+    return _engines[username]
 
 
 class QueryRequest(BaseModel):
@@ -130,7 +133,7 @@ def process_investigative_query(payload: QueryRequest,
                                 user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
     """Processes a natural language investigative query and returns Evidentiary Chain-of-Thought, SQL, and graph trace."""
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
         result = engine.analyze_query(payload.query)
         _last_call_meta.update({
             "provider": result.get("llm_provider", ""),
@@ -163,7 +166,8 @@ def copilot_health(user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
         from .llm_client import LlmClient
         from .memory import MemoryStore
 
-        bundle = _api._state.get("bundle")
+        user_state = _api._state.get(user["username"], {})
+        bundle = user_state.get("bundle")
         ms = MemoryStore(bundle)
         client = LlmClient()
         return {
@@ -197,7 +201,7 @@ def summarize_entity_cluster(payload: ClusterSummaryRequest,
                              user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
     """Generates an executive lead summary paragraph for a cluster of clicked nodes/transactions."""
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
         result = engine.summarize_cluster(payload.entity_ids)
         return result
     except HTTPException:
@@ -238,7 +242,7 @@ def get_database_schema(user: dict = Depends(auth.require_user)) -> Dict[str, An
 def get_copilot_stats(user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
     """Returns database statistics for the Co-Pilot module."""
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
         conn = engine.conn
         cursor = conn.cursor()
         
@@ -271,7 +275,7 @@ def get_entity_graph(entity_id: str, max_hops: int = 3,
                      user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
     """Returns the 3-hop NetworkX graph structure (nodes, edges, layers) for an entity or transaction."""
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
         result = engine.graph_engine.trace_mule_chain(entity_id, max_hops=max_hops)
         return result
     except HTTPException:
@@ -287,7 +291,7 @@ def get_entity_linking_tree(entity_id: str, max_hops: int = 3,
     """Returns the complete linking tree for an entity/transaction: accounts,
     phones and their transactions/calls grouped by hop layer."""
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
         result = engine.graph_engine.linking_tree(entity_id, max_hops=max_hops)
         return result
     except HTTPException:
@@ -303,7 +307,7 @@ def get_entity_graph_html(entity_id: str, max_hops: int = 3,
     """Returns an interactive standalone HTML Network Diagram for viewing in browser."""
     from fastapi.responses import HTMLResponse
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
         res = engine.graph_engine.trace_mule_chain(entity_id, max_hops=max_hops)
         
         nodes = res.get("nodes", [])[:500]
@@ -384,7 +388,7 @@ def build_llm_investigation_tree(payload: LlmTreeRequest,
     narrative. Falls back to the deterministic graph when no LLM provider is
     reachable, so the tree is ALWAYS returned."""
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
         tree = engine.graph_engine.linking_tree(payload.entity_id,
                                                 max_hops=payload.max_hops)
         if not tree.get("found", False):
@@ -515,7 +519,7 @@ def build_investigation_graph(payload: GraphBuildRequest,
     Returns nodes + edges shaped for the frontend force-graph renderer,
     with LLM annotations when available."""
     try:
-        engine = get_engine()
+        engine = get_engine(user["username"])
 
         # 1. Get the raw graph traversal
         graph = engine.graph_engine.trace_mule_chain(
@@ -779,7 +783,7 @@ def get_entity_full_details(entity_id: str,
     """Retrieves full profile, all direct transactions, calls, IP sessions, and an LLM-generated audit report for an entity."""
     try:
         from .db_builder import get_copilot_db
-        bundle = _current_bundle()
+        bundle = _current_bundle(user["username"])
         if not bundle:
             raise HTTPException(status_code=409, detail="No dataset loaded")
             

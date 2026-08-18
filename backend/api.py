@@ -62,37 +62,18 @@ else:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Clean startup workflow: clears stale caches, pipeline jobs and temp data if configured."""
     _log.info("[AUTH] Storage database path resolved to: %s", store._db_path().resolve())
     try:
         if config.clear_on_startup():
-            store.clear_bundle()
             with _lock:
                 _state.clear()
-            orchestrator.reset()
             copilot_router.reset_engine()
-            risk.clear_cache()
-            risk.clear_hybrid_cache()
-            clear_fusion_cache()
-            clear_report_cache()
-            clear_graph_cache()
-            
-            # Clean orphan temp upload folders from temp directory
             import glob, shutil
             for tmp_folder in glob.glob(os.path.join(tempfile.gettempdir(), "backend_upload_*")):
                 try:
                     shutil.rmtree(tmp_folder, ignore_errors=True)
                 except Exception:
                     pass
-            _log.info("[CLEANUP] Clean startup: Purged stale datasets, previous pipeline jobs, temp files, and in-memory caches.")
-        else:
-            bundle = store.load_bundle()
-            if bundle and (bundle.get("bank") or bundle.get("cdr") or bundle.get("ipdr")):
-                with _lock:
-                    _state["bundle"] = bundle
-                copilot_router.learn_bundle(bundle)
-                orchestrator.start_pipeline(bundle)
-                _log.info("Restored persisted bundle from store on startup")
     except Exception as e:
         _log.warning("Failed during startup lifecycle: %s", e)
     yield
@@ -129,38 +110,7 @@ app.add_middleware(
 
 app.include_router(copilot_router.router)
 # Force reload for copilot and cache locks
-class _AutoBundleState(dict):
-    def get(self, key, default=None):
-        if key == "bundle" and not super().__contains__("bundle"):
-            try:
-                b = store.load_bundle()
-                if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
-                    super().__setitem__("bundle", b)
-                    copilot_router.learn_bundle(b)
-                    return b
-            except Exception:
-                pass
-        return super().get(key, default)
-
-    def __getitem__(self, key):
-        val = self.get(key)
-        if val is None and not super().__contains__(key):
-            raise KeyError(key)
-        return val
-
-    def __contains__(self, key):
-        if key == "bundle" and not super().__contains__("bundle"):
-            try:
-                b = store.load_bundle()
-                if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
-                    super().__setitem__("bundle", b)
-                    copilot_router.learn_bundle(b)
-                    return True
-            except Exception:
-                pass
-        return super().__contains__(key)
-
-_state = _AutoBundleState()
+_state: dict = {}
 if "backend.api" in sys.modules:
     sys.modules["backend.api"]._state = _state
 if "api" in sys.modules:
@@ -172,11 +122,10 @@ from concurrent.futures import ThreadPoolExecutor
 _lock = threading.Lock()
 _persist_executor = ThreadPoolExecutor(max_workers=1)
 
-def _persist() -> None:
-    b = _state.get("bundle")
+def _persist(username: str) -> None:
+    b = _state.get(username, {}).get("bundle")
     if b:
-        # Run serialization asynchronously in background so HTTP response returns instantly
-        _persist_executor.submit(store.save_bundle, b)
+        _persist_executor.submit(store.save_bundle, b, username)
 
 
 
@@ -212,11 +161,11 @@ def root():
 
 @app.get("/health")
 def health():
-    b = _state.get("bundle")
+    b = None
     return {
         "status": "ok",
-        "loaded": bool(b),
-        "last_ingested": store.last_ingested(),
+        "loaded": False,
+        "last_ingested": None,
         "stats": {
             "bank": len(b.get("bank", [])) if b else 0,
             "cdr": len(b.get("cdr", [])) if b else 0,
@@ -291,10 +240,10 @@ def auth_change_password(body: ChangePasswordBody,
 
 @app.get("/ingest/status")
 def ingest_status(user: dict = Depends(auth.require_user)):
-    b = _state.get("bundle")
+    b = _state.get(user["username"], {}).get("bundle")
     return {
         "loaded": bool(b),
-        "last_ingested": store.last_ingested(),
+        "last_ingested": store.last_ingested(user["username"]),
         "bank": len(b["bank"]) if b else 0,
         "cdr": len(b["cdr"]) if b else 0,
         "ipdr": len(b["ipdr"]) if b else 0,
@@ -308,18 +257,18 @@ def ingest_status(user: dict = Depends(auth.require_user)):
 
 @app.get("/ingest/pipeline-status")
 def get_pipeline_status(user: dict = Depends(auth.require_user)):
-    return orchestrator.get_status()
+    return orchestrator.get_status(user["username"])
 
 
 @app.delete("/ingest")
 def ingest_clear(user: dict = Depends(auth.require_user)):
     """Drop the loaded bundle (and its persisted copy)."""
+    username = user["username"]
     with _lock:
-        if "bundle" in _state:
-            _state.pop("bundle", None)
-        dict.clear(_state)
-    store.clear_bundle()
-    orchestrator.reset()
+        if username in _state:
+            _state.pop(username, None)
+    store.clear_bundle(username)
+    orchestrator.reset(username)
     copilot_router.reset_engine()
     risk.clear_cache()
     risk.clear_hybrid_cache()
@@ -346,20 +295,17 @@ def ingest(req: IngestRequest, user: dict = Depends(auth.require_user)) -> Inges
     
     folder_str = str(requested_path)
     _log.info("ingesting folder %s", folder_str)
+    username = user["username"]
     with _lock:
-        _state["bundle"] = ingest_folder(folder_str)
-        _persist()
-    copilot_router.reset_engine()
-    risk.clear_cache()
-    risk.clear_hybrid_cache()
-    clear_fusion_cache()
-    clear_report_cache()
-    clear_graph_cache()
+        if username not in _state:
+            _state[username] = {}
+        _state[username]["bundle"] = ingest_folder(folder_str)
+        _persist(username)
     
-    orchestrator.start_pipeline(_state["bundle"])
-    b = _state["bundle"]
+    orchestrator.start_pipeline(_state[username]["bundle"], username)
+    b = _state[username]["bundle"]
 
-    copilot_router.learn_bundle(b)
+    copilot_router.learn_bundle(b, username)
     _log.info("ingest done: %d files ok, %d skipped, %d errors | bank=%d cdr=%d ipdr=%d",
               len(b["files"]["ok"]), len(b["files"]["skipped"]),
               len(b["files"]["errors"]), len(b["bank"]), len(b["cdr"]),
@@ -373,16 +319,25 @@ def ingest(req: IngestRequest, user: dict = Depends(auth.require_user)) -> Inges
     )
 
 
-def _require_bundle() -> dict:
-    if "bundle" not in _state:
-        raise HTTPException(409, "no data loaded; POST /ingest first")
-    return _state["bundle"]
+def _require_bundle(user: dict) -> dict:
+    username = user["username"]
+    user_state = _state.get(username, {})
+    if "bundle" not in user_state:
+        b = store.load_bundle(username)
+        if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
+            user_state["bundle"] = b
+            _state[username] = user_state
+            copilot_router.learn_bundle(b, username)
+            return b
+        else:
+            raise HTTPException(409, "no data loaded; POST /ingest first")
+    return user_state["bundle"]
 
 
 @app.get("/summary")
 def summary(user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
-    status = orchestrator.get_status()
+    b = _require_bundle(user)
+    status = orchestrator.get_status(user["username"])
     
     if status.get("anomalies_ready") or status.get("ready"):
         res = risk.hybrid_analyze_fast(b)
@@ -423,14 +378,14 @@ def summary(user: dict = Depends(auth.require_user)):
         },
         "top_risk_accounts": top_accs,
         "top_risk_phones": top_phones,
-        "last_ingested": store.last_ingested(),
+        "last_ingested": store.last_ingested(user["username"]),
     }
 
 
 @app.get("/accounts")
 def accounts(min_score: float = 0, limit: int = Query(50, le=500),
              user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     heat = cached_fraud_heat(b)
     analysis = account_analysis(b)
     out = []
@@ -456,7 +411,7 @@ def accounts(min_score: float = 0, limit: int = Query(50, le=500),
 @app.get("/phones")
 def phones(min_score: float = 0, limit: int = Query(50, le=500),
            user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     heat = cached_fraud_heat(b)
     out = [p for p in heat["phones"] if p["score"] >= min_score][:limit]
     return {"phones": out}
@@ -466,7 +421,7 @@ def phones(min_score: float = 0, limit: int = Query(50, le=500),
 def phone_egonet(phone: str, depth: int = Query(1, ge=1, le=3), min_weight: int = 0,
                  mode: str = Query("evidence", pattern="^(evidence|full)$"),
                  user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     if mode == "evidence":
         return evidence.evidence_egonet(b, phone, depth=depth)
     g = phone_call_graph(b["cdr"])
@@ -476,7 +431,7 @@ def phone_egonet(phone: str, depth: int = Query(1, ge=1, le=3), min_weight: int 
 @app.get("/entity/{kind}/{value}")
 def entity_evidence(kind: str, value: str,
                     user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     if kind not in ("account", "phone", "upi", "imei", "imsi", "ip", "name"):
         raise HTTPException(400, f"unsupported entity kind: {kind}")
     info = evidence.entity_intelligence(b, kind, value)
@@ -487,7 +442,7 @@ def entity_evidence(kind: str, value: str,
 @app.get("/dossier/{kind}/{value}")
 def get_dossier(kind: str, value: str,
                 user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     if kind not in ("transaction", "account", "phone", "upi", "imei", "imsi", "ip", "name"):
         raise HTTPException(400, f"unsupported dossier kind: {kind}")
     return dossier.generate_dossier(b, kind, value)
@@ -496,17 +451,17 @@ def get_dossier(kind: str, value: str,
 @app.get("/relationship/{a}/{b}")
 def relationship_evidence(a: str, b: str,
                           user: dict = Depends(auth.require_user)):
-    return evidence.relationship_intelligence(_require_bundle(), a, b)
+    return evidence.relationship_intelligence(_require_bundle(user), a, b)
 
 
 @app.get("/graph/device")
 def graph_device(phone: str, user: dict = Depends(auth.require_user)):
-    return evidence.device_graph(_require_bundle(), phone)
+    return evidence.device_graph(_require_bundle(user), phone)
 
 
 @app.get("/graph/ip")
 def graph_ip(phone: str, user: dict = Depends(auth.require_user)):
-    return evidence.ip_graph(_require_bundle(), phone)
+    return evidence.ip_graph(_require_bundle(user), phone)
 
 
 @app.get("/report/entity/{kind}/{value}")
@@ -514,7 +469,7 @@ def entity_report(kind: str, value: str,
                   user: dict = Depends(auth.require_user)):
     if kind not in ("account", "phone", "upi", "imei", "imsi", "ip", "name"):
         raise HTTPException(400, f"unsupported entity kind: {kind}")
-    b = _require_bundle()
+    b = _require_bundle(user)
     import hashlib
     safe_val = hashlib.sha256(value.encode()).hexdigest()[:16]
     path = os.path.join(tempfile.gettempdir(),
@@ -531,7 +486,7 @@ def entity_report(kind: str, value: str,
 def timeline(kind: str | None = None, since: int | None = None,
              until: int | None = None, limit: int = Query(2000, le=20000),
              user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     events = cached_build_timeline(b)
     if kind:
         events = [e for e in events if e["kind"] == kind]
@@ -543,7 +498,7 @@ def timeline(kind: str | None = None, since: int | None = None,
 
 @app.get("/timeline/event/{source_type}/{event_id}")
 def timeline_event(source_type: str, event_id: str, user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     if source_type.lower() not in ("bank", "cdr", "ipdr", "complaint"):
         raise HTTPException(400, f"unsupported source type: {source_type}")
     out = events.get_event_dossier(b, source_type, event_id)
@@ -554,7 +509,7 @@ def timeline_event(source_type: str, event_id: str, user: dict = Depends(auth.re
 
 @app.get("/payouts")
 def payouts(user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     return rapid_payouts(b)
 
 
@@ -562,13 +517,13 @@ def payouts(user: dict = Depends(auth.require_user)):
 def coincidence(window_sec: int = Query(3600, ge=60, le=86400),
                 limit: int = Query(100, le=1000),
                 user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     return correlate_phones(b, window_sec=window_sec, limit=limit)
 
 
 @app.get("/report")
 def report(user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     path = os.path.join(tempfile.gettempdir(), "str_report.pdf")
     generate_str_report(b, path)
     return FileResponse(path, media_type="application/pdf",
@@ -600,20 +555,20 @@ class AddFindingBody(BaseModel):
 
 @app.get("/investigations")
 def investigations_list(user: dict = Depends(auth.require_user)):
-    return {"investigations": store.list_investigations()}
+    return {"investigations": store.list_investigations(user["username"])}
 
 
 @app.post("/investigations")
 def investigations_create(body: CreateInvestigationBody,
                           user: dict = Depends(auth.require_user)):
-    inv = store.create_investigation(body.title, body.notes)
+    inv = store.create_investigation(body.title, user["username"], body.notes)
     return {"investigation": inv}
 
 
 @app.get("/investigations/{investigation_id}")
 def investigations_get(investigation_id: int,
                        user: dict = Depends(auth.require_user)):
-    inv = store.get_investigation(investigation_id)
+    inv = store.get_investigation(investigation_id, user["username"])
     if not inv:
         raise HTTPException(404, "investigation not found")
     return {"investigation": inv}
@@ -622,7 +577,7 @@ def investigations_get(investigation_id: int,
 @app.patch("/investigations/{investigation_id}")
 def investigations_update(investigation_id: int, body: UpdateInvestigationBody,
                           user: dict = Depends(auth.require_user)):
-    inv = store.update_investigation(investigation_id, title=body.title,
+    inv = store.update_investigation(investigation_id, user["username"], title=body.title,
                                      notes=body.notes, status=body.status)
     if not inv:
         raise HTTPException(404, "investigation not found")
@@ -632,14 +587,14 @@ def investigations_update(investigation_id: int, body: UpdateInvestigationBody,
 @app.delete("/investigations/{investigation_id}")
 def investigations_delete(investigation_id: int,
                           user: dict = Depends(auth.require_user)):
-    store.delete_investigation(investigation_id)
+    store.delete_investigation(investigation_id, user["username"])
     return {"deleted": investigation_id}
 
 
 @app.post("/investigations/{investigation_id}/findings")
 def investigations_add_finding(investigation_id: int, body: AddFindingBody,
                                user: dict = Depends(auth.require_user)):
-    finding = store.add_finding(investigation_id, body.kind, body.title,
+    finding = store.add_finding(investigation_id, user["username"], body.kind, body.title,
                                 detail=body.detail, severity=body.severity)
     if not finding:
         raise HTTPException(404, "investigation not found")
@@ -649,7 +604,7 @@ def investigations_add_finding(investigation_id: int, body: AddFindingBody,
 @app.get("/investigations/{investigation_id}/findings")
 def investigations_list_findings(investigation_id: int,
                                  user: dict = Depends(auth.require_user)):
-    return {"findings": store.list_findings(investigation_id)}
+    return {"findings": store.list_findings(investigation_id, user["username"])}
 
 
 @app.get("/investigations/{investigation_id}/tree")
@@ -658,10 +613,10 @@ def investigations_tree(investigation_id: int,
     """Investigation tree: returns the case with its findings plus any
     flagged transactions, linked phones, and evidence chains associated
     with the investigation's subject accounts."""
-    inv = store.get_investigation(investigation_id)
+    inv = store.get_investigation(investigation_id, user["username"])
     if not inv:
         raise HTTPException(404, "investigation not found")
-    b = _require_bundle()
+    b = _require_bundle(user)
     scored = risk.cached_transaction_risk(b)
     # Find transactions related to findings
     finding_titles = {f["title"].lower() for f in inv.get("findings", [])}
@@ -693,33 +648,33 @@ def investigations_tree(investigation_id: int,
 @app.get("/hybrid/analyze")
 def hybrid_analyze(user: dict = Depends(auth.require_user)):
     """Full hybrid analysis payload across transactions, accounts, entities."""
-    return risk.hybrid_analyze(_require_bundle())
+    return risk.hybrid_analyze(_require_bundle(user))
 
 
 @app.get("/hybrid/transactions")
 def hybrid_transactions(min_score: float = Query(0, ge=0, le=100),
                         limit: int = Query(50, le=500),
                         user: dict = Depends(auth.require_user)):
-    rows = risk.hybrid_transaction_risk(_require_bundle(), min_score=min_score)
+    rows = risk.hybrid_transaction_risk(_require_bundle(user), min_score=min_score)
     return {"transactions": rows[:limit], "total": len(rows)}
 
 
 @app.get("/hybrid/accounts")
 def hybrid_accounts(user: dict = Depends(auth.require_user)):
-    rows = risk.hybrid_account_risk(_require_bundle())
+    rows = risk.hybrid_account_risk(_require_bundle(user))
     return {"accounts": rows, "total": len(rows)}
 
 
 @app.get("/hybrid/entities")
 def hybrid_entities(user: dict = Depends(auth.require_user)):
-    rows = risk.hybrid_entity_risk(_require_bundle())
+    rows = risk.hybrid_entity_risk(_require_bundle(user))
     return {"entities": rows, "total": len(rows)}
 
 
 @app.get("/hybrid/explain/transaction/{transaction_id}")
 def hybrid_explain_transaction(transaction_id: str,
                                user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     out = risk.explanations_for_txn(b, transaction_id)
     if not out:
         raise HTTPException(404, "transaction not found")
@@ -729,7 +684,7 @@ def hybrid_explain_transaction(transaction_id: str,
 @app.get("/hybrid/explain/account/{account_no}")
 def hybrid_explain_account(account_no: str,
                             user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     out = risk.explanations_for_account(b, account_no)
     if not out:
         raise HTTPException(404, "account not found")
@@ -739,7 +694,7 @@ def hybrid_explain_account(account_no: str,
 @app.get("/hybrid/explain/entity/{kind}/{entity}")
 def hybrid_explain_entity(kind: str, entity: str,
                           user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     out = risk.explanations_for_entity(b, kind, entity)
     if not out:
         raise HTTPException(404, "entity not found")
@@ -760,7 +715,7 @@ def hybrid_weights(user: dict = Depends(auth.require_user)):
 def risk_accounts(min_score: float = Query(0, ge=0, le=100),
                   limit: int = Query(50, le=500),
                   user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     res = risk.cached_account_risk(b)
     accounts = [a for a in res["accounts"] if a["risk_score"] >= min_score][:limit]
     return {"accounts": accounts, "total": len(accounts),
@@ -773,7 +728,7 @@ def risk_transactions(min_score: float = Query(0, ge=0, le=100),
                       limit: int = Query(50, le=1000),
                       band: str = Query("", pattern="^(SAFE|LOW|MEDIUM|HIGH|CRITICAL)?$"),
                       user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     scored = risk.cached_transaction_risk(b)
     results = []
     for s in scored:
@@ -808,7 +763,7 @@ def anomalies_top(limit: int = Query(50, le=500),
 @app.get("/transactions/{transaction_id}")
 def transaction_detail(transaction_id: str,
                        user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     scored = risk.cached_transaction_risk(b)
     s = next((x for x in scored if x["transaction_id"] == transaction_id),
              None)
@@ -819,7 +774,9 @@ def transaction_detail(transaction_id: str,
 
 @app.get("/loading/status")
 def loading_status(user: dict = Depends(auth.require_user)):
-    b = _state.get("bundle")
+    username = user["username"]
+    user_state = _state.get(username, {})
+    b = user_state.get("bundle")
     if not b:
         return {"loaded": False, "detail": "no bundle ingested yet"}
     return {
@@ -829,15 +786,15 @@ def loading_status(user: dict = Depends(auth.require_user)):
         "ipdr": len(b.get("ipdr", [])),
         "complaints": len(b.get("complaints", [])),
         "entities": len(b.get("entities", [])),
-        "last_ingested": store.last_ingested(),
-        "cache_warm": bool(_state.get("hybrid_warm", False)),
+        "last_ingested": store.last_ingested(username),
+        "cache_warm": bool(user_state.get("hybrid_warm", False)),
     }
 
 
 @app.get("/report/transaction/{transaction_id}")
 def transaction_report(transaction_id: str,
                        user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     import hashlib
     safe_id = hashlib.sha256(transaction_id.encode()).hexdigest()[:16]
     path = os.path.join(tempfile.gettempdir(),
@@ -861,7 +818,7 @@ def reports_intelligence(user: dict = Depends(auth.require_user)):
     rule engines — nothing is fabricated.
     """
     from backend.report_intelligence import report_intelligence
-    return report_intelligence(_require_bundle())
+    return report_intelligence(_require_bundle(user))
 
 
 # ---------------------------------------------------------------- analytics
@@ -873,7 +830,7 @@ def reports_intelligence(user: dict = Depends(auth.require_user)):
 def graph_money(min_amount: float = Query(0, ge=0),
                 limit: int = Query(300, le=1000),
                 user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     g = cached_money_graph(b)
     nodes, edges = [], []
     for n in g.nodes:
@@ -893,7 +850,7 @@ def graph_money(min_amount: float = Query(0, ge=0),
 @app.get("/graph/account-phone")
 def graph_account_phone(limit: int = Query(200, le=500),
                         user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     g = cached_account_phone_graph(b)
     nodes = [{"id": n, "kind": g.nodes[n].get("kind", "")} for n in list(g.nodes)[:limit]]
     edges = [{"source": u, "target": v, "kind": d.get("kind", "")}
@@ -904,7 +861,7 @@ def graph_account_phone(limit: int = Query(200, le=500),
 @app.get("/graph/central-phones")
 def graph_central_phones(top: int = Query(15, ge=1, le=100),
                          user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     return {"phones": central_phones(cached_phone_call_graph(b), top)}
 
 
@@ -912,7 +869,7 @@ def graph_central_phones(top: int = Query(15, ge=1, le=100),
 def flows_patterns(min_amount: float = Query(10000, ge=0),
                    window_min: int = Query(15, ge=1),
                    user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     return {
         "circular": circular_flows(b, min_amount=min_amount),
         "rapid_in_out": rapid_in_out(b, window_min=window_min),
@@ -922,7 +879,7 @@ def flows_patterns(min_amount: float = Query(10000, ge=0),
 @app.get("/payouts")
 def payouts_endpoint(user: dict = Depends(auth.require_user)):
     """Rapid bursts and round-trip payouts detection."""
-    b = _require_bundle()
+    b = _require_bundle(user)
     bank = b.get("bank") or []
     rapid = []
     round_payouts = []
@@ -976,7 +933,7 @@ def payouts_endpoint(user: dict = Depends(auth.require_user)):
 def ml_outliers_endpoint(contamination: float = Query(0.05, gt=0, le=0.5),
                          min_txns: int = Query(5, ge=1),
                          user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     return ml.ml_outliers(b, contamination=contamination, min_txns=min_txns)
 
 
@@ -984,7 +941,7 @@ def ml_outliers_endpoint(contamination: float = Query(0.05, gt=0, le=0.5),
 def search(q: str = Query("", max_length=128),
            limit: int = Query(50, le=200),
            user: dict = Depends(auth.require_user)):
-    b = _require_bundle()
+    b = _require_bundle(user)
     return search_bundle(b, q, limit=limit)
 
 
@@ -1007,23 +964,20 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
             fh.write(await f.read())
         names.append(name)
     _log.info("uploading %d files -> %s", len(names), tmp)
+    username = user["username"]
     def _do_ingest():
         with _lock:
-            _state["bundle"] = ingest_folder(tmp)
-            _persist()
+            if username not in _state:
+                _state[username] = {}
+            _state[username]["bundle"] = ingest_folder(tmp)
+            _persist(username)
             
     from fastapi.concurrency import run_in_threadpool
     await run_in_threadpool(_do_ingest)
-    copilot_router.reset_engine()
-    risk.clear_cache()
-    risk.clear_hybrid_cache()
-    clear_fusion_cache()
-    clear_report_cache()
-    clear_graph_cache()
     
-    orchestrator.start_pipeline(_state["bundle"])
-    b = _state["bundle"]
-    copilot_router.learn_bundle(b)
+    orchestrator.start_pipeline(_state[username]["bundle"], username)
+    b = _state[username]["bundle"]
+    copilot_router.learn_bundle(b, username)
     return {
         "detail": "fusion complete",
         "files": [{"name": n} for n in b["files"]["ok"]]
@@ -1046,11 +1000,11 @@ def scoring_alerts(min_risk: float = Query(50, ge=0, le=100),
     +60 boost (rule NCRP_FRAUD_ACCOUNT), so complaints never disappear
     from the alert feed regardless of transaction behaviour.
     """
-    b = _require_bundle()
+    b = _require_bundle(user)
     if not b.get("bank"):
         return {"results": [], "total": 0}
         
-    status = orchestrator.get_status()
+    status = orchestrator.get_status(user["username"])
     if not status.get("anomalies_ready") and status.get("status") in ("PARSING", "FUSING", "SCORING") and status.get("dataset_id"):
         raise HTTPException(425, "Anomaly detection engine is still warming up.")
         
@@ -1161,7 +1115,7 @@ def fused_data(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=10
     Pass risk_annotate=1 to attach behavioural risk scores to each row
     (expensive on large bundles — runs the full scoring engine once).
     """
-    b = _require_bundle()
+    b = _require_bundle(user)
     scored = None
     if risk_annotate:
         res = risk.hybrid_analyze_fast(b)
@@ -1182,7 +1136,7 @@ def fused_data_csv(q: str = Query(""), account: str = Query(""), mode: str = Que
                    max_rows: int = Query(50000, ge=1, le=200000),
                    user: dict = Depends(auth.require_user)):
     """Download the fused dataset as CSV (the 'fused CSV' export)."""
-    b = _require_bundle()
+    b = _require_bundle(user)
     # Apply scored if risk_band is specified
     scored = None
     if risk_band and risk_band.lower() != "all":
@@ -1262,7 +1216,7 @@ def analysis_heatmap(body: HeatmapBody,
                      user: dict = Depends(auth.require_user)):
     """Account × hour-of-day activity heatmap over the fused bank corpus."""
     from backend.analysis import account_hour_heatmap
-    b = _require_bundle()
+    b = _require_bundle(user)
     return account_hour_heatmap(b, account=body.account or "",
                                 max_accounts=max(1, min(60, body.max_accounts)))
 
@@ -1273,7 +1227,7 @@ def analysis_relationship(body: RelationshipBody,
     """Relationship model between the selected transactions: money-flow legs,
     shared accounts/phones, time proximity — with edge strength + reasons."""
     from backend.analysis import relationship_model
-    b = _require_bundle()
+    b = _require_bundle(user)
     ids = [str(t) for t in body.transaction_ids if t][:500]
     if not ids:
         raise HTTPException(400, "select at least one transaction")
@@ -1300,7 +1254,7 @@ def evaluate(bundle_eval: EvaluateBody,
     """
     from backend.validate.comparator import build_validation_report
     from backend.validate.ground_truth import read_anomalies_csv
-    b = _require_bundle()
+    b = _require_bundle(user)
     if bundle_eval.anomalies_csv:
         gt = read_anomalies_csv(bundle_eval.anomalies_csv)
     elif bundle_eval.ground_truth_dir:

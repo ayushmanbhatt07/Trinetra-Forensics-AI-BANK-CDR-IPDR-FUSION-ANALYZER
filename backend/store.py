@@ -25,12 +25,15 @@ from . import config
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS bundle (
-    key       TEXT PRIMARY KEY,
+    username  TEXT NOT NULL,
+    key       TEXT NOT NULL,
     payload   TEXT NOT NULL,
-    updated   TEXT NOT NULL
+    updated   TEXT NOT NULL,
+    PRIMARY KEY (username, key)
 );
 CREATE TABLE IF NOT EXISTS investigations (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    username     TEXT NOT NULL,
     title        TEXT NOT NULL,
     notes        TEXT NOT NULL DEFAULT '',
     status       TEXT NOT NULL DEFAULT 'open',
@@ -39,6 +42,7 @@ CREATE TABLE IF NOT EXISTS investigations (
 );
 CREATE TABLE IF NOT EXISTS findings (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    username         TEXT NOT NULL,
     investigation_id INTEGER NOT NULL,
     kind             TEXT NOT NULL,
     title            TEXT NOT NULL,
@@ -48,6 +52,7 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 CREATE TABLE IF NOT EXISTS pipeline_jobs (
     job_id           TEXT PRIMARY KEY,
+    username         TEXT NOT NULL,
     dataset_id       TEXT NOT NULL,
     status           TEXT NOT NULL,
     stage            TEXT NOT NULL,
@@ -78,15 +83,54 @@ def _db_path() -> Path:
     return config.data_dir() / "backend.db"
 
 
+def _migrate_legacy_db(conn: sqlite3.Connection):
+    """Migrate legacy single-tenant tables to multi-tenant by assigning old data to 'admin'."""
+    # Check if investigations exists before renaming to handle partial states safely
+    tables = [col[0] for col in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    
+    if "bundle" in tables:
+        conn.execute("ALTER TABLE bundle RENAME TO legacy_bundle;")
+    if "investigations" in tables:
+        conn.execute("ALTER TABLE investigations RENAME TO legacy_investigations;")
+    if "findings" in tables:
+        conn.execute("ALTER TABLE findings RENAME TO legacy_findings;")
+    if "pipeline_jobs" in tables:
+        conn.execute("ALTER TABLE pipeline_jobs RENAME TO legacy_pipeline_jobs;")
+        
+    conn.executescript(_SCHEMA)
+    
+    if "bundle" in tables:
+        conn.execute("INSERT INTO bundle(username, key, payload, updated) SELECT 'admin', key, payload, updated FROM legacy_bundle;")
+        conn.execute("DROP TABLE legacy_bundle;")
+    if "investigations" in tables:
+        conn.execute("INSERT INTO investigations(id, username, title, notes, status, created, updated) SELECT id, 'admin', title, notes, status, created, updated FROM legacy_investigations;")
+        conn.execute("DROP TABLE legacy_investigations;")
+    if "findings" in tables:
+        conn.execute("INSERT INTO findings(id, username, investigation_id, kind, title, detail, severity, created) SELECT id, 'admin', investigation_id, kind, title, detail, severity, created FROM legacy_findings;")
+        conn.execute("DROP TABLE legacy_findings;")
+    if "pipeline_jobs" in tables:
+        conn.execute("INSERT INTO pipeline_jobs(job_id, username, dataset_id, status, stage, progress, started_at, updated_at, completed_at, error_message, fused_ready, anomalies_ready, graphs_ready) SELECT job_id, 'admin', dataset_id, status, stage, progress, started_at, updated_at, completed_at, error_message, fused_ready, anomalies_ready, graphs_ready FROM legacy_pipeline_jobs;")
+        conn.execute("DROP TABLE legacy_pipeline_jobs;")
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(_db_path()), timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_SCHEMA)
+    
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(bundle)")
+    columns = [col[1] for col in cursor.fetchall()]
+    
+    if columns and "username" not in columns:
+        _migrate_legacy_db(conn)
+    else:
+        conn.executescript(_SCHEMA)
+        
     return conn
 
 
-def save_bundle(bundle: dict) -> None:
-    """Persist a full bundle atomically (all datasets in one transaction)."""
+def save_bundle(bundle: dict, username: str) -> None:
+    """Persist a full bundle atomically (all datasets in one transaction) for a user."""
     with _lock:
         conn = _connect()
         try:
@@ -94,22 +138,22 @@ def save_bundle(bundle: dict) -> None:
                 now = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 for key in _KEYS:
                     conn.execute(
-                        "INSERT INTO bundle(key, payload, updated) VALUES(?,?,?)"
-                        " ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,"
+                        "INSERT INTO bundle(username, key, payload, updated) VALUES(?,?,?,?)"
+                        " ON CONFLICT(username, key) DO UPDATE SET payload=excluded.payload,"
                         " updated=excluded.updated",
-                        (key, json.dumps(bundle.get(key, []),
+                        (username, key, json.dumps(bundle.get(key, []),
                                          default=_json_default), now))
         finally:
             conn.close()
 
 
-def load_bundle() -> dict | None:
-    """Return the persisted bundle or None when the store is empty."""
+def load_bundle(username: str) -> dict | None:
+    """Return the persisted bundle for a user or None when the store is empty."""
     with _lock:
         conn = _connect()
         try:
             rows = conn.execute(
-                "SELECT key, payload FROM bundle").fetchall()
+                "SELECT key, payload FROM bundle WHERE username=?", (username,)).fetchall()
         finally:
             conn.close()
     if not rows:
@@ -124,35 +168,35 @@ def load_bundle() -> dict | None:
     return out
 
 
-def clear_bundle() -> None:
-    """Drop all persisted bundle tables and pipeline jobs from SQLite."""
+def clear_bundle(username: str) -> None:
+    """Drop all persisted bundle tables and pipeline jobs from SQLite for a user."""
     with _lock:
         conn = _connect()
         try:
             with conn:
-                conn.execute("DELETE FROM bundle")
-                conn.execute("DELETE FROM pipeline_jobs")
-                conn.execute("DELETE FROM findings")
-                conn.execute("DELETE FROM investigations")
+                conn.execute("DELETE FROM bundle WHERE username=?", (username,))
+                conn.execute("DELETE FROM pipeline_jobs WHERE username=?", (username,))
+                conn.execute("DELETE FROM findings WHERE username=?", (username,))
+                conn.execute("DELETE FROM investigations WHERE username=?", (username,))
         finally:
             conn.close()
 
 
-def save_pipeline_job(job: dict) -> None:
-    """Upsert a pipeline job into the database."""
+def save_pipeline_job(job: dict, username: str) -> None:
+    """Upsert a pipeline job into the database for a user."""
     with _lock:
         conn = _connect()
         try:
             with conn:
                 conn.execute(
-                    "INSERT INTO pipeline_jobs(job_id, dataset_id, status, stage, progress, started_at, updated_at, completed_at, error_message, fused_ready, anomalies_ready, graphs_ready) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "INSERT INTO pipeline_jobs(job_id, username, dataset_id, status, stage, progress, started_at, updated_at, completed_at, error_message, fused_ready, anomalies_ready, graphs_ready) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(job_id) DO UPDATE SET "
                     "status=excluded.status, stage=excluded.stage, progress=excluded.progress, updated_at=excluded.updated_at, "
                     "completed_at=excluded.completed_at, error_message=excluded.error_message, "
                     "fused_ready=excluded.fused_ready, anomalies_ready=excluded.anomalies_ready, graphs_ready=excluded.graphs_ready",
                     (
-                        job["job_id"], job["dataset_id"], job["status"], job["stage"], job.get("progress"),
+                        job["job_id"], username, job["dataset_id"], job["status"], job["stage"], job.get("progress"),
                         job["started_at"], job["updated_at"], job.get("completed_at"), job.get("error_message"),
                         1 if job.get("fused_ready") else 0,
                         1 if job.get("anomalies_ready") else 0,
@@ -163,14 +207,14 @@ def save_pipeline_job(job: dict) -> None:
             conn.close()
 
 
-def get_active_pipeline_job() -> dict | None:
-    """Get the most recently updated active pipeline job, if any."""
+def get_active_pipeline_job(username: str) -> dict | None:
+    """Get the most recently updated active pipeline job for a user, if any."""
     with _lock:
         conn = _connect()
         try:
             row = conn.execute(
                 "SELECT job_id, dataset_id, status, stage, progress, started_at, updated_at, completed_at, error_message, fused_ready, anomalies_ready, graphs_ready "
-                "FROM pipeline_jobs ORDER BY updated_at DESC LIMIT 1"
+                "FROM pipeline_jobs WHERE username=? ORDER BY updated_at DESC LIMIT 1", (username,)
             ).fetchone()
         finally:
             conn.close()
@@ -194,12 +238,12 @@ def get_active_pipeline_job() -> dict | None:
     }
 
 
-def last_ingested() -> str | None:
+def last_ingested(username: str) -> str | None:
     with _lock:
         conn = _connect()
         try:
             row = conn.execute(
-                "SELECT updated FROM bundle WHERE key='bank'").fetchone()
+                "SELECT updated FROM bundle WHERE key='bank' AND username=?", (username,)).fetchone()
         finally:
             conn.close()
     return row[0] if row else None
@@ -209,15 +253,15 @@ def last_ingested() -> str | None:
 # Investigations (case files with structured findings)
 # ---------------------------------------------------------------------------
 
-def create_investigation(title: str, notes: str = "") -> dict:
+def create_investigation(title: str, username: str, notes: str = "") -> dict:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _lock:
         conn = _connect()
         try:
             with conn:
                 cur = conn.execute(
-                    "INSERT INTO investigations(title, notes, created, updated) "
-                    "VALUES(?,?,?,?)", (title, notes, now, now))
+                    "INSERT INTO investigations(username, title, notes, created, updated) "
+                    "VALUES(?,?,?,?,?)", (username, title, notes, now, now))
                 iid = cur.lastrowid
         finally:
             conn.close()
@@ -225,13 +269,13 @@ def create_investigation(title: str, notes: str = "") -> dict:
             "created": now, "updated": now, "findings": []}
 
 
-def list_investigations() -> list[dict]:
+def list_investigations(username: str) -> list[dict]:
     with _lock:
         conn = _connect()
         try:
             rows = conn.execute(
                 "SELECT id, title, notes, status, created, updated "
-                "FROM investigations ORDER BY updated DESC").fetchall()
+                "FROM investigations WHERE username=? ORDER BY updated DESC", (username,)).fetchall()
         finally:
             conn.close()
     out = []
@@ -239,28 +283,28 @@ def list_investigations() -> list[dict]:
         out.append({"id": r[0], "title": r[1], "notes": r[2], "status": r[3],
                     "created": r[4], "updated": r[5]})
     for inv in out:
-        inv["findings"] = list_findings(inv["id"])
+        inv["findings"] = list_findings(inv["id"], username)
     return out
 
 
-def get_investigation(investigation_id: int) -> dict | None:
+def get_investigation(investigation_id: int, username: str) -> dict | None:
     with _lock:
         conn = _connect()
         try:
             row = conn.execute(
                 "SELECT id, title, notes, status, created, updated "
-                "FROM investigations WHERE id=?", (investigation_id,)).fetchone()
+                "FROM investigations WHERE id=? AND username=?", (investigation_id, username)).fetchone()
         finally:
             conn.close()
     if not row:
         return None
     inv = {"id": row[0], "title": row[1], "notes": row[2], "status": row[3],
            "created": row[4], "updated": row[5]}
-    inv["findings"] = list_findings(inv["id"])
+    inv["findings"] = list_findings(inv["id"], username)
     return inv
 
 
-def update_investigation(investigation_id: int, title: str | None = None,
+def update_investigation(investigation_id: int, username: str, title: str | None = None,
                          notes: str | None = None,
                          status: str | None = None) -> dict | None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -275,44 +319,51 @@ def update_investigation(investigation_id: int, title: str | None = None,
                         fields.append(f"{col}=?")
                         vals.append(v)
                 if not fields:
-                    return get_investigation(investigation_id)
+                    return get_investigation(investigation_id, username)
                 vals.append(now)
                 vals.append(investigation_id)
+                vals.append(username)
                 conn.execute(
                     f"UPDATE investigations SET {', '.join(fields)}, updated=? "
-                    f"WHERE id=?", vals)
+                    f"WHERE id=? AND username=?", vals)
         finally:
             conn.close()
-    return get_investigation(investigation_id)
+    return get_investigation(investigation_id, username)
 
 
-def delete_investigation(investigation_id: int) -> None:
+def delete_investigation(investigation_id: int, username: str) -> None:
     with _lock:
         conn = _connect()
         try:
             with conn:
-                conn.execute("DELETE FROM findings WHERE investigation_id=?",
-                             (investigation_id,))
-                conn.execute("DELETE FROM investigations WHERE id=?",
-                             (investigation_id,))
+                # First delete associated findings to avoid orphans
+                conn.execute("DELETE FROM findings WHERE investigation_id=? AND username=?",
+                             (investigation_id, username))
+                conn.execute("DELETE FROM investigations WHERE id=? AND username=?",
+                             (investigation_id, username))
         finally:
             conn.close()
 
 
-def add_finding(investigation_id: int, kind: str, title: str,
+def add_finding(investigation_id: int, username: str, kind: str, title: str,
                 detail: str = "", severity: str = "medium") -> dict | None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _lock:
         conn = _connect()
         try:
             with conn:
+                # Verify investigation ownership before adding finding
+                row = conn.execute("SELECT id FROM investigations WHERE id=? AND username=?", (investigation_id, username)).fetchone()
+                if not row:
+                    return None
+                    
                 cur = conn.execute(
-                    "INSERT INTO findings(investigation_id, kind, title, detail, "
-                    "severity, created) VALUES(?,?,?,?,?,?)",
-                    (investigation_id, kind, title, detail, severity, now))
+                    "INSERT INTO findings(username, investigation_id, kind, title, detail, "
+                    "severity, created) VALUES(?,?,?,?,?,?,?)",
+                    (username, investigation_id, kind, title, detail, severity, now))
                 fid = cur.lastrowid
-                conn.execute("UPDATE investigations SET updated=? WHERE id=?",
-                             (now, investigation_id))
+                conn.execute("UPDATE investigations SET updated=? WHERE id=? AND username=?",
+                             (now, investigation_id, username))
         finally:
             conn.close()
     return {"id": fid, "investigation_id": investigation_id, "kind": kind,
@@ -320,14 +371,14 @@ def add_finding(investigation_id: int, kind: str, title: str,
             "created": now}
 
 
-def list_findings(investigation_id: int) -> list[dict]:
+def list_findings(investigation_id: int, username: str) -> list[dict]:
     with _lock:
         conn = _connect()
         try:
             rows = conn.execute(
                 "SELECT id, kind, title, detail, severity, created "
-                "FROM findings WHERE investigation_id=? ORDER BY created",
-                (investigation_id,)).fetchall()
+                "FROM findings WHERE investigation_id=? AND username=? ORDER BY created",
+                (investigation_id, username)).fetchall()
         finally:
             conn.close()
     return [{"id": r[0], "kind": r[1], "title": r[2], "detail": r[3],
