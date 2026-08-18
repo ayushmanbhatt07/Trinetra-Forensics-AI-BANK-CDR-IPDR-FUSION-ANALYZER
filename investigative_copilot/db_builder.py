@@ -477,27 +477,28 @@ class CopilotDBBuilder:
         conn.commit()
 
 
-_global_db_conn: Optional[sqlite3.Connection] = None
+_global_db_conns: Dict[str, sqlite3.Connection] = {}
 _global_db_source: str = "csv"
 
 def get_copilot_db(bundle: Optional[Dict[str, Any]] = None,
-                   data_dir: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
+                   data_dir: Optional[Union[str, Path]] = None,
+                   username: str = "default") -> sqlite3.Connection:
     """Returns a singleton SQLite connection for the Copilot module.
 
     Pass a v3 bundle to build the forensic schema from the in-memory dataset;
     without one the original CSV-folder builder is used.
     """
-    global _global_db_conn, _global_db_source
-    if _global_db_conn is not None:
-        return _global_db_conn
+    global _global_db_conns, _global_db_source
+    if username in _global_db_conns:
+        return _global_db_conns[username]
     if bundle is not None:
         builder = CopilotDBBuilder()
-        _global_db_conn = builder.build_database_from_bundle(bundle)
+        _global_db_conns[username] = builder.build_database_from_bundle(bundle)
     else:
         builder = CopilotDBBuilder(data_dir=data_dir)
-        _global_db_conn = builder.build_database()
+        _global_db_conns[username] = builder.build_database()
     _global_db_source = builder.source
-    return _global_db_conn
+    return _global_db_conns[username]
 
 
 def copilot_db_source() -> str:
@@ -506,7 +507,10 @@ def copilot_db_source() -> str:
     return _global_db_source
 
 
-def reset_copilot_db() -> None:
-    """Drops the singleton connection so the next get_copilot_db() rebuilds."""
-    global _global_db_conn
-    _global_db_conn = None
+def reset_copilot_db(username: str = None) -> None:
+    """Drops the connection so the next get_copilot_db() rebuilds."""
+    global _global_db_conns
+    if username:
+        _global_db_conns.pop(username, None)
+    else:
+        _global_db_conns.clear()

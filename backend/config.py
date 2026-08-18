@@ -133,17 +133,17 @@ def clear_on_startup() -> bool:
     return _get("CLEAR_ON_STARTUP", "1").lower() in ("1", "true", "yes", "on")
 
 
-def groq_api_keys() -> list[str]:
-    """All configured Groq keys, de-duplicated, in fallback order.
+def open_router_keys() -> list[str]:
+    """All configured OpenRouter keys, de-duplicated, in fallback order.
     
     Supports rotation to avoid rate limits.
-    Automatically discovers any environment variable starting with GROQ_API_KEY.
+    Automatically discovers any environment variable starting with OPEN_ROUTER_KEY.
     """
     out = []
     
-    # Collect all keys starting with GROQ_API_KEY and sort them by variable name
+    # Collect all keys starting with OPEN_ROUTER_KEY and sort them by variable name
     keys_from_env = sorted(
-        [k for k in os.environ.keys() if k.startswith("GROQ_API_KEY")]
+        [k for k in os.environ.keys() if k.startswith("OPEN_ROUTER_KEY")]
     )
     
     for key_name in keys_from_env:

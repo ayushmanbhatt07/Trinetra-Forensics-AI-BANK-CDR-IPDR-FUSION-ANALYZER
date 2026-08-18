@@ -84,12 +84,13 @@ class MemoryStore:
     """File-backed key/value memory for one bundle fingerprint."""
 
     def __init__(self, bundle: Optional[Dict[str, Any]] = None,
-                 path: Optional[Path] = None) -> None:
+                 path: Optional[Path] = None, username: str = "default") -> None:
         self._lock = threading.RLock()
+        self.username = username
         self.fingerprint = _fingerprint(bundle)
         self.path = path or (config.data_dir() / "copilot_memory.json")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._data: Dict[str, Any] = self._load().get(self.fingerprint, {})
+        self._data: Dict[str, Any] = self._load().get(self.username, {})
         self._loaded_fp = self.fingerprint
         if bundle is not None and _DIGEST_KEY not in self._data:
             self.set(_DIGEST_KEY, build_bundle_digest(bundle))
@@ -106,7 +107,7 @@ class MemoryStore:
     def _save(self) -> None:
         try:
             all_data = self._load()
-            all_data[self.fingerprint] = self._data
+            all_data[self.username] = self._data
             self.path.write_text(json.dumps(all_data, ensure_ascii=False,
                                             indent=1), encoding="utf-8")
         except OSError as e:

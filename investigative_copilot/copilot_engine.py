@@ -11,7 +11,7 @@ from .db_builder import copilot_db_source, get_copilot_db
 from .graph_engine import CopilotGraphEngine
 from .llm_client import LlmClient
 from .memory import MemoryStore
-from .prompts import SYSTEM_PROMPT
+from .prompts import SYSTEM_PROMPT, INTERPRETATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -154,12 +154,12 @@ class InvestigativeCoPilotEngine:
     """
 
     def __init__(self, conn: Optional[sqlite3.Connection] = None,
-                 bundle: Optional[Dict[str, Any]] = None):
-        self.conn = conn if conn is not None else get_copilot_db(bundle)
+                 bundle: Optional[Dict[str, Any]] = None, username: str = "default"):
+        self.conn = conn if conn is not None else get_copilot_db(bundle, username=username)
         self.graph_engine = CopilotGraphEngine(self.conn)
         self.dataset_source = copilot_db_source()
         self.llm = LlmClient()
-        self.memory = MemoryStore(bundle)
+        self.memory = MemoryStore(bundle, username=username)
         self._last_llm_meta: Dict[str, Any] = {}
 
     def analyze_query(self, user_query: str) -> Dict[str, Any]:
@@ -218,7 +218,36 @@ class InvestigativeCoPilotEngine:
             except Exception as e:  # noqa: BLE001 — explainability is best-effort
                 logger.debug("explainability skipped: %s", e)
                 llm_response["explainability"] = ""
-        return llm_response
+        
+        return self._make_serializable(llm_response)
+
+    def _make_serializable(self, obj: Any) -> Any:
+        """Deeply convert all non-native types (Decimal, datetime, numpy, NaN, sets) to JSON-safe builtins."""
+        if isinstance(obj, dict):
+            return {k: self._make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_serializable(v) for v in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._make_serializable(v) for v in obj)
+        elif isinstance(obj, set):
+            return [self._make_serializable(v) for v in sorted(obj)]
+        elif type(obj) in (int, float, str, bool, type(None)):
+            if isinstance(obj, float):
+                import math
+                if math.isnan(obj) or math.isinf(obj):
+                    return None
+            return obj
+        else:
+            if hasattr(obj, "item") and callable(getattr(obj, "item")):
+                try:
+                    return self._make_serializable(obj.item())
+                except Exception:
+                    pass
+            if hasattr(obj, "isoformat") and callable(getattr(obj, "isoformat")):
+                return obj.isoformat()
+            if isinstance(obj, bytes):
+                return obj.hex()
+            return str(obj)
 
     def summarize_cluster(self, entity_ids: List[str]) -> Dict[str, Any]:
         """Generates an executive lead summary for a cluster of entities/transactions (e.g. node click in UI)."""
@@ -268,13 +297,15 @@ class InvestigativeCoPilotEngine:
             f"Immediate cyber cell action recommended: freeze target account and subpoena associated CDR tower logs."
         )
 
-        return {
+        return self._make_serializable({
             "entity_id": primary_entity,
             "resolved_account": resolved_start_node,
             "total_entities_in_cluster": len(entity_ids),
+            "total_amount_processed": tot_amt,
+            "transaction_count": tx_cnt,
             "graph_analysis": graph_res,
             "executive_summary": summary_text
-        }
+        })
 
     def _run_deterministic_pipeline(self, user_query: str) -> Dict[str, Any]:
         """Deterministic query translator and CoT generator for cyber-forensic
@@ -991,11 +1022,30 @@ class InvestigativeCoPilotEngine:
                     execution_success = False
                     logger.warning(f"LLM generated invalid SQL: {e}")
 
-                # Graph computation deferred: trace_mule_chain / linking_tree
-                # are no longer run eagerly during the normal query path.
-                # The /llm-tree endpoint handles graph generation on demand.
+                # Graph computation deferred
                 graph_res = None
                 tree_res = None
+                
+                # Second LLM call: interpretation
+                interp_summary = ""
+                interp_answer = ""
+                interp_risk = ""
+                cot = _normalize_cot(parsed.get("cot_reasoning", []))
+
+                if execution_success and records:
+                    import json
+                    interp_content = (
+                        f"INVESTIGATOR QUERY: {user_query}\n\n"
+                        f"SQL EXECUTED:\n{sql_q}\n\n"
+                        f"EXECUTED QUERY ROWS:\n{json.dumps(records[:20], default=str)}"
+                    )
+                    ok2, parsed2, meta2 = self.llm.generate_json(INTERPRETATION_PROMPT, interp_content)
+                    if ok2 and parsed2:
+                        interp_summary = parsed2.get("executive_summary", "")
+                        interp_answer = parsed2.get("final_answer", "")
+                        interp_risk = parsed2.get("suspicion_reasoning", "")
+                        if "cot_reasoning" in parsed2:
+                            cot.extend(_normalize_cot(parsed2["cot_reasoning"]))
 
                 envelope = self._finalize({
                     "query": user_query,
@@ -1006,12 +1056,10 @@ class InvestigativeCoPilotEngine:
                     "records": records[:10],
                     "graph_traversal": graph_res,
                     "linking_tree": tree_res,
-                    "chain_of_thought": _normalize_cot(
-                        parsed.get("cot_reasoning", [])),
-                    "executive_summary": parsed.get("executive_summary",
-                                                    general_answer),
-                    "risk_summary": parsed.get("suspicion_reasoning", ""),
-                    "answer": parsed.get("final_answer") or parsed.get("executive_summary") or general_answer,
+                    "chain_of_thought": cot,
+                    "executive_summary": interp_summary or "Executed query. Summary unavailable.",
+                    "risk_summary": interp_risk or "",
+                    "answer": interp_answer or "Found records based on the generated SQL query.",
                     "mode": "sql",
                 }, entity_hint=start_node)
             else:

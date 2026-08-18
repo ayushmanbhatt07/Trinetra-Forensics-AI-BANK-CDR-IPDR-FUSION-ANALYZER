@@ -907,43 +907,43 @@ export const api = {
     URL.revokeObjectURL(url);
   },
 
-  copilotStats: () => request<CopilotStats>("/api/v1/copilot/stats"),
+  copilotStats: () => request<CopilotStats>("/v1/copilot/stats"),
   copilotSchema: () =>
-    request<{ database: string; tables: CopilotSchemaTable[] }>("/api/v1/copilot/schema"),
+    request<{ database: string; tables: CopilotSchemaTable[] }>("/v1/copilot/schema"),
   copilotQuery: (query: string) =>
-    request<CopilotQueryResult>("/api/v1/copilot/query", {
+    request<CopilotQueryResult>("/v1/copilot/query", {
       method: "POST",
       body: JSON.stringify({ query }),
     }),
   copilotTree: (entityId: string, maxHops = 3) =>
     request<LinkingTree>(
-      `/api/v1/copilot/tree/${encodeURIComponent(entityId)}?max_hops=${maxHops}`
+      `/v1/copilot/tree/${encodeURIComponent(entityId)}?max_hops=${maxHops}`
     ),
   copilotGraph: (entityId: string, maxHops = 3) =>
     request<LinkingTree>(
-      `/api/v1/copilot/graph/${encodeURIComponent(entityId)}?max_hops=${maxHops}`
+      `/v1/copilot/graph/${encodeURIComponent(entityId)}?max_hops=${maxHops}`
     ),
   copilotClusterSummary: (entityIds: string[]) =>
-    request<CopilotClusterSummary>("/api/v1/copilot/cluster-summary", {
+    request<CopilotClusterSummary>("/v1/copilot/cluster-summary", {
       method: "POST",
       body: JSON.stringify({ entity_ids: entityIds }),
     }),
   copilotGraphBuild: (entityId: string, maxHops = 3) =>
-    request<any>("/api/v1/copilot/graph/build", {
+    request<any>("/v1/copilot/graph/build", {
       method: "POST",
       body: JSON.stringify({ entity_id: entityId, max_hops: maxHops }),
     }),
   copilotInsightsGenerate: (payload: any) =>
-    request<any>("/api/v1/copilot/insights/generate", {
+    request<any>("/v1/copilot/insights/generate", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
   copilotEntityDetails: (entityId: string, includeAudit = false) =>
-    request<any>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/details?include_audit=${includeAudit}`),
+    request<any>(`/v1/copilot/entity/${encodeURIComponent(entityId)}/details?include_audit=${includeAudit}`),
   copilotEntityAudit: (entityId: string) =>
-    request<{ entity_id: string; audit_report: string }>(`/api/v1/copilot/entity/${encodeURIComponent(entityId)}/audit`),
+    request<{ entity_id: string; audit_report: string }>(`/v1/copilot/entity/${encodeURIComponent(entityId)}/audit`),
   copilotLlmTree: (entityId: string, maxHops = 3) =>
-    request<LlmTreeResult>("/api/v1/copilot/llm-tree", {
+    request<LlmTreeResult>("/v1/copilot/llm-tree", {
       method: "POST",
       body: JSON.stringify({ entity_id: entityId, max_hops: maxHops }),
     }),

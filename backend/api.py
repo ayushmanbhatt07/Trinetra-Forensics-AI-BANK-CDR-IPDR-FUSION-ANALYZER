@@ -153,7 +153,7 @@ def root():
             "auth": ["/auth/login", "/auth/register", "/auth/me"],
             "ingest": ["/ingest", "/ingest/status", "/ingest/pipeline-status", "/upload/parse-multi"],
             "fusion": ["/summary", "/data/fused", "/data/fused.csv", "/scoring/alerts"],
-            "copilot": ["/api/v1/copilot/query", "/api/v1/copilot/stats"],
+            "copilot": ["/v1/copilot/query", "/v1/copilot/stats"],
             "docs": "/docs",
         },
     }

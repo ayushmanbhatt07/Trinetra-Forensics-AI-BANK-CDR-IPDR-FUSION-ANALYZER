@@ -14,7 +14,7 @@ from .prompts import SAMPLE_QUERIES_PROMPT
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/copilot", tags=["Investigative Co-Pilot"])
+router = APIRouter(prefix="/v1/copilot", tags=["Investigative Co-Pilot"])
 
 # Lazy engine initialization, rebuilt whenever the loaded bundle changes.
 _engines: Dict[str, InvestigativeCoPilotEngine] = {}
@@ -47,7 +47,7 @@ def reset_engine(username: str = None) -> None:
     else:
         _engines.clear()
         _engine_bundles.clear()
-    reset_copilot_db()
+    reset_copilot_db(username)
 
 
 def learn_bundle(bundle: Dict[str, Any], username: str = None) -> None:
@@ -56,7 +56,7 @@ def learn_bundle(bundle: Dict[str, Any], username: str = None) -> None:
     (entity census, top accounts, phone overlap, digest fingerprint)."""
     try:
         from .memory import MemoryStore
-        ms = MemoryStore(bundle)
+        ms = MemoryStore(bundle, username=username or "default")
         ms.refresh(bundle)
         logger.info("copilot memory refreshed (fingerprint=%s, digest=%d bytes)",
                     ms.fingerprint, len(ms.digest()))
@@ -73,8 +73,8 @@ def get_engine(username: str) -> InvestigativeCoPilotEngine:
             detail="no data loaded; POST /ingest first"
         )
     if username not in _engines or _engine_bundles.get(username) is not bundle:
-        _engines[username] = InvestigativeCoPilotEngine(conn=get_copilot_db(bundle),
-                                             bundle=bundle)
+        _engines[username] = InvestigativeCoPilotEngine(conn=get_copilot_db(bundle, username=username),
+                                             bundle=bundle, username=username)
         _engine_bundles[username] = bundle
     return _engines[username]
 
@@ -132,6 +132,7 @@ def translate_co_pilot_answer(payload: TranslateRequest,
 def process_investigative_query(payload: QueryRequest,
                                 user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
     """Processes a natural language investigative query and returns Evidentiary Chain-of-Thought, SQL, and graph trace."""
+    logger.info("[COPILOT QUERY HIT]")
     try:
         engine = get_engine(user["username"])
         result = engine.analyze_query(payload.query)
@@ -168,7 +169,7 @@ def copilot_health(user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
 
         user_state = _api._state.get(user["username"], {})
         bundle = user_state.get("bundle")
-        ms = MemoryStore(bundle)
+        ms = MemoryStore(bundle, username=user["username"])
         client = LlmClient()
         return {
             "loaded": bundle is not None,
@@ -178,8 +179,8 @@ def copilot_health(user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
                 "ipdr": len((bundle or {}).get("ipdr", [])),
             },
             "providers": {
-                "groq_keys": len(config.groq_api_keys()),
-                "groq_model": client.groq_model,
+                "openrouter_keys": len(config.open_router_keys()),
+                "openrouter_model": client.active_model,
             },
             "memory": {
                 "file": str(ms.path),

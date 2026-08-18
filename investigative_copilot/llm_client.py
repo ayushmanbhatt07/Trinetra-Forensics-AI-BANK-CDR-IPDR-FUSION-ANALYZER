@@ -1,7 +1,7 @@
-"""Single-provider LLM client (Groq).
+"""Single-provider LLM client (OpenRouter).
 
 Plain-HTTP implementation (``requests`` + stdlib only) so the copilot runs
-without any optional SDKs installed. The provider is Groq (OpenAI-compatible
+without any optional SDKs installed. The provider is OpenRouter (OpenAI-compatible
 ``/chat/completions``). Every call reports which provider/model served it
 and its latency so the engine can expose it to the UI.
 
@@ -24,12 +24,14 @@ from backend import config
 
 logger = logging.getLogger(__name__)
 
-GROQ_MODEL = "llama-3.1-8b-instant"
+OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 FALLBACK_MODELS = [
-    "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "z-ai/glm-5.2:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
 ]
-_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -87,12 +89,12 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 class LlmClient:
-    """Zero-dependency HTTP client for Groq LLMs."""
+    """Zero-dependency HTTP client for OpenRouter LLMs."""
 
-    def __init__(self, groq_model: str = GROQ_MODEL,
-                 groq_timeout: float = 45.0) -> None:
-        self.groq_model = os.environ.get("GROQ_MODEL", groq_model)
-        self.groq_timeout = groq_timeout
+    def __init__(self, active_model: str = OPENROUTER_MODEL,
+                 request_timeout: float = 45.0) -> None:
+        self.active_model = os.environ.get("OPENROUTER_MODEL", active_model)
+        self.request_timeout = request_timeout
         self._last_latency = 0
 
     @property
@@ -100,8 +102,8 @@ class LlmClient:
         return self._last_latency
 
     def has_provider(self) -> bool:
-        """True when at least one Groq API key is configured."""
-        return bool(config.groq_api_keys())
+        """True when at least one OpenRouter API key is configured."""
+        return bool(config.open_router_keys())
 
     def generate_json(self, system_prompt: str, user_content: str,
                       temperature: float = 0.1
@@ -109,33 +111,33 @@ class LlmClient:
         meta: Dict[str, Any] = {
             "provider": "", "model": "", "latency_ms": 0, "error": "",
         }
-        keys = config.groq_api_keys()
+        keys = config.open_router_keys()
 
         if keys:
-            ok, parsed, err = self._call_groq(
+            ok, parsed, err = self._call_openrouter(
                 system_prompt, user_content, temperature, json_mode=True,
                 keys=keys)
             meta["latency_ms"] = self.latency_ms
             if ok:
-                meta["provider"] = "groq"
-                meta["model"] = self.groq_model
+                meta["provider"] = "openrouter"
+                meta["model"] = self.active_model
                 return True, parsed, meta
-            meta["error"] = f"groq: {err}"
-            logger.warning("Groq call failed: %s", err)
+            meta["error"] = f"openrouter: {err}"
+            logger.warning("OpenRouter call failed: %s", err)
         else:
-            meta["error"] = "groq: no API key configured"
-            logger.info("Groq key missing.")
+            meta["error"] = "openrouter: no API key configured"
+            logger.info("OpenRouter key missing.")
 
         return False, None, meta
 
-    def _call_groq(self, system_prompt: str, user_content: str,
-                   temperature: float, json_mode: bool,
-                   keys: Optional[List[str]] = None
-                   ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
+    def _call_openrouter(self, system_prompt: str, user_content: str,
+                         temperature: float, json_mode: bool,
+                         keys: Optional[List[str]] = None
+                         ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
         if not keys:
-            keys = config.groq_api_keys()
+            keys = config.open_router_keys()
 
-        models_to_try = [self.groq_model] + [m for m in FALLBACK_MODELS if m != self.groq_model]
+        models_to_try = [self.active_model] + [m for m in FALLBACK_MODELS if m != self.active_model]
         last_err = "no keys configured"
 
         for model in models_to_try:
@@ -152,18 +154,21 @@ class LlmClient:
                 payload["response_format"] = {"type": "json_object"}
 
             for i, key in enumerate(keys):
-                ok, parsed, err = self._post_json(_GROQ_URL, payload, key,
-                                                  self.groq_timeout,
+                ok, parsed, err = self._post_json(_OPENROUTER_URL, payload, key,
+                                                  self.request_timeout,
                                                   auth_header="Authorization")
                 if ok:
-                    self.groq_model = model
+                    self.active_model = model
                     return True, parsed, ""
                 last_err = f"model={model} key{i}: {err}"
                 if "decommission" in err.lower() or "not_found" in err.lower() or "404" in err:
-                    logger.warning(f"Groq model {model} unavailable, trying fallback model...")
+                    logger.warning(f"OpenRouter model {model} unavailable, trying fallback model...")
+                    break
+                if "empty completion" in err or "no parseable json" in err.lower():
+                    logger.warning(f"OpenRouter model {model} failed to generate valid response ({err}), trying fallback model...")
                     break
                 if i < len(keys) - 1:
-                    logger.warning("Groq key %d failed (%s); rotating to next key", i, err)
+                    logger.warning("OpenRouter key %d failed (%s); rotating to next key", i, err)
 
         return False, None, last_err
 
@@ -174,7 +179,11 @@ class LlmClient:
                    ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
         t0 = time.monotonic()
         try:
-            headers = {auth_header: key}
+            headers = {
+                auth_header: key,
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "Trinetra Investigative Copilot",
+            }
             if auth_header == "Authorization":
                 headers[auth_header] = f"Bearer {key}"
             resp = requests.post(url, json=payload, timeout=timeout,
@@ -190,6 +199,16 @@ class LlmClient:
         if resp.status_code != 200:
             msg = str(data.get("error", data))[:200] if isinstance(data, dict) else str(data)[:200]
             return False, None, f"HTTP {resp.status_code}: {msg}"
+            
+        # Log OpenRouter metadata
+        choices_len = len(data.get("choices", []))
+        finish_reason = data.get("choices", [{}])[0].get("finish_reason", "unknown") if choices_len > 0 else "N/A"
+        message_obj = data.get("choices", [{}])[0].get("message", {}) if choices_len > 0 else {}
+        content_val = message_obj.get("content")
+        logger.info(f"OpenRouter Raw: model={data.get('model', 'unknown')} status={resp.status_code} "
+                    f"choices={choices_len} finish_reason={finish_reason} "
+                    f"content_present={'yes' if content_val else 'no'} content_length={len(content_val) if content_val else 0}")
+                    
         text = self._extract_text(data)
         if not text:
             return False, None, "empty completion"
