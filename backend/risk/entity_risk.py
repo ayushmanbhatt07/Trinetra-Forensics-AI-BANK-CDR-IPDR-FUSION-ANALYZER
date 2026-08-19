@@ -44,14 +44,51 @@ def _entity_values(t: dict) -> dict[str, list[str]]:
 
 
 def _shared_map(bundle: dict) -> dict[str, dict[str, set]]:
-    """kind -> identifier -> set of account_no (ledger) + customer ids."""
+    """kind -> identifier -> set of account_no (ledger) + customer ids (and fallback phone/IP)."""
     out: dict[str, dict[str, set]] = {k: defaultdict(set) for k in KINDS}
+    
+    phone_to_acc = defaultdict(set)
+    ip_to_acc = defaultdict(set)
+    
     for t in bundle.get("bank", []):
         acc = t.get("account_no") or ""
         cust = t.get("customer_id") or acc
+        if not acc and not cust:
+            continue
+        entity = acc or cust
         for kind, values in _entity_values(t).items():
             for v in values:
-                out[kind][v].add(acc or cust)
+                out[kind][v].add(entity)
+                if kind == "phone":
+                    phone_to_acc[v].add(entity)
+                elif kind == "ip":
+                    ip_to_acc[v].add(entity)
+                    
+    for c in bundle.get("cdr", []):
+        for prefix in ("caller", "receiver"):
+            ph = c.get(prefix)
+            if not ph: continue
+            ph_str = str(ph)
+            accs = phone_to_acc.get(ph_str) or {ph_str}
+            
+            imei = c.get(f"{prefix}_imei")
+            if imei:
+                for a in accs: out["imei"][str(imei)].add(a)
+            
+            imsi = c.get(f"{prefix}_imsi")
+            if imsi:
+                for a in accs: out["imsi"][str(imsi)].add(a)
+                
+    for i in bundle.get("ipdr", []):
+        imsi = i.get("imsi")
+        if not imsi: continue
+        for k in ("private_ip", "public_ip"):
+            ip = i.get(k)
+            if ip:
+                ip_str = str(ip)
+                accs = ip_to_acc.get(ip_str) or {ip_str}
+                for a in accs: out["imsi"][str(imsi)].add(a)
+
     return out
 
 

@@ -131,21 +131,23 @@ def _safe_amount(r: dict[str, Any]) -> float:
     """Extract the best numeric amount from a copilot result row.
 
     Checks every known column name and robustly parses strings with commas,
-    currency symbols, etc.  Returns 0.0 when nothing is found.
+    currency symbols, etc. Returns 0.0 when nothing is found.
     """
-    # Check in priority order — SQL results use 'transaction_amount',
-    # the risk engine uses 'amount', aggregations use 'total_amount'.
     for key in ("transaction_amount", "amount", "total_amount",
-                "max_leg", "amount_usd"):
+                "max_leg", "amount_usd", "credit", "debit", "volume"):
         raw = r.get(key)
         if raw is None:
             continue
         try:
             if isinstance(raw, (int, float)):
-                return float(raw)
+                val = float(raw)
+                if math.isfinite(val):
+                    return val
             cleaned = str(raw).replace(",", "").replace("₹", "").replace("Rs", "").replace("INR", "").strip()
             if cleaned:
-                return float(cleaned)
+                val = float(cleaned)
+                if math.isfinite(val):
+                    return val
         except (TypeError, ValueError):
             continue
     return 0.0
@@ -162,27 +164,55 @@ def plain_explainability(envelope: dict[str, Any], query: str = "") -> str:
     parts: list[str] = []
 
     if envelope.get("intent"):
-        parts.append(f"Query intent classified as '{envelope['intent']}'.")
+        parts.append(f"Forensic Focus: {envelope['intent']}")
 
     if top:
         leads = []
         for r in top:
-            txn = r.get("transaction_id") or r.get("txn_id") or ""
-            acc = (r.get("receiver_account_number") or r.get("sender_account_number")
-                   or r.get("account_no") or r.get("receiver_account") or "")
+            txn = str(r.get("transaction_id") or r.get("txn_id") or r.get("id") or "").strip()
+            acc = str(r.get("receiver_account_number") or r.get("sender_account_number")
+                      or r.get("account_no") or r.get("receiver_account") or r.get("sender_account") or "").strip()
+            name = str(r.get("receiver_customer_name") or r.get("sender_customer_name")
+                       or r.get("customer_name") or r.get("name") or "").strip()
+            phone = str(r.get("a_party_number") or r.get("b_party_number") or r.get("sender_phone_number")
+                        or r.get("receiver_phone_number") or r.get("phone") or r.get("mobile") or "").strip()
             amt_val = _safe_amount(r)
-            who = f"account {acc}" if acc else (txn or "a record")
-            amt = f" of ₹{amt_val:,.0f}" if amt_val > 0 else ""
-            mode = r.get("transaction_mode") or ""
-            mode_txt = f" via {mode}" if mode else ""
-            leads.append(f"{who} shows a transfer{amt}{mode_txt}"
-                         + (f" ({txn})" if txn else ""))
-        parts.append("Top evidence:\n" + "\n".join(f"- {lead}" for lead in leads))
+            amt_str = f"₹{amt_val:,.2f}" if amt_val > 0 else ""
+            mode = str(r.get("transaction_mode") or r.get("mode") or "").strip().upper()
+            date_time = str(r.get("timestamp") or r.get("date") or r.get("call_start_time") or "").strip()
 
-    if envelope.get("risk_summary") or envelope.get("executive_summary"):
-        parts.append("\nThe overall risk assessment is that this pattern deserves "
-                     "investigator review — see the narrative above for details.")
+            tokens = []
+            if acc:
+                tokens.append(f"Account {acc}" + (f" ({name})" if name else ""))
+            elif name:
+                tokens.append(f"Entity {name}")
+            elif phone:
+                tokens.append(f"Phone {phone}")
+            elif txn:
+                tokens.append(f"Txn {txn}")
+            else:
+                tokens.append("Observation Node")
+
+            if amt_str:
+                tokens.append(f"Amount {amt_str}")
+            if mode:
+                tokens.append(f"Channel {mode}")
+            if date_time:
+                tokens.append(f"Time {date_time[:19]}")
+            if txn and acc:
+                tokens.append(f"ID: {txn}")
+            if r.get("tx_count"):
+                tokens.append(f"{r['tx_count']} txns")
+
+            leads.append("• " + " | ".join(tokens))
+        parts.append("Key Evidentiary Records:\n" + "\n".join(leads))
+
+    if envelope.get("risk_summary"):
+        parts.append(f"\nRisk Assessment: {envelope['risk_summary']}")
+    elif envelope.get("executive_summary"):
+        parts.append(f"\nExecutive Rationale: {envelope['executive_summary']}")
 
     if not parts:
         return ""
-    return " ".join(parts)
+    return "\n\n".join(parts)
+

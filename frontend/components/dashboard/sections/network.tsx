@@ -442,15 +442,15 @@ export const NetworkSection = React.memo(function NetworkSection() {
       };
 
       loaders[t]()
-        .catch((e) =>
-          toast.error(
-            e.status === 409
-              ? "No data loaded."
-              : t === "calls"
+        .catch((e) => {
+          if (e.status !== 409 && e.status !== 425) {
+            toast.error(
+              t === "calls"
                 ? "Failed to load network graph."
                 : "Failed to load graph."
-          )
-        )
+            );
+          }
+        })
         .finally(() => setLoading(false));
     },
     [mode, revealCycle]
@@ -458,11 +458,15 @@ export const NetworkSection = React.memo(function NetworkSection() {
 
   // Initial phone loading: run once per dataset or when graphs become ready
   useEffect(() => {
+    if (!isGraphReady && !pipeline?.dataset_id) {
+      setLoading(false);
+      return;
+    }
     api
       .phones(0, 100)
       .then((res) => {
-        setPhones(res.phones);
-        if (res.phones.length > 0) {
+        setPhones(res.phones || []);
+        if (res.phones && res.phones.length > 0) {
           const top = res.phones[0].phone;
           setSelected(top);
           loadTab("calls", top, mode);
@@ -471,8 +475,9 @@ export const NetworkSection = React.memo(function NetworkSection() {
         }
       })
       .catch((e) => {
-        if (e.status !== 409) toast.error("Failed to load phones.");
-      });
+        if (e.status !== 409 && e.status !== 425) toast.error("Failed to load phones.");
+      })
+      .finally(() => setLoading(false));
   }, [pipeline?.dataset_id, isGraphReady]);
 
   const switchTab = (t: Tab) => {

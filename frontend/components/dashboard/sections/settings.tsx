@@ -28,8 +28,9 @@ export const SettingsSection = React.memo(function SettingsSection() {
     setClearing(true);
     try {
       await api.clearData();
-      toast.success("Bundle cleared. Re-run ingestion to load data.");
+      toast.success("Dataset cleared. Navigating to Ingestion to load new data.");
       load();
+      window.dispatchEvent(new CustomEvent("nav:section", { detail: "ingestion" }));
     } catch {
       toast.error("Failed to clear data.");
     } finally {

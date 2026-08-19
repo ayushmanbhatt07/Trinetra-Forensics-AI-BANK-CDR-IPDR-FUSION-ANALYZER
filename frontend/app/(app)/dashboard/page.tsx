@@ -13,6 +13,7 @@ import { SettingsSection } from "@/components/dashboard/sections/settings";
 import { SearchSection } from "@/components/dashboard/sections/search";
 import { FusedSection } from "@/components/dashboard/sections/fused";
 import { TransactionSTRReport } from "@/components/omni/transaction-str";
+import { usePipeline } from "@/lib/pipeline-context";
 
 export type Section = "overview" | "ingestion" | "network" | "fused" | "anomalies" | "timeline" | "reports" | "settings" | "search";
 
@@ -20,10 +21,14 @@ export default function Dashboard() {
   const [activeSection, setActiveSection] = useState<Section>("overview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [strTransactionId, setStrTransactionId] = useState<string | null>(null);
+  const [strFallbackTxn, setStrFallbackTxn] = useState<any>(null);
   const [showIngestPrompt, setShowIngestPrompt] = useState(false);
+
+  const { isFusedReady, pipeline, loading: pipelineLoading } = usePipeline();
 
   const handleCloseStr = useCallback(() => {
     setStrTransactionId(null);
+    setStrFallbackTxn(null);
   }, []);
 
   const handleOpenIngestion = useCallback(() => {
@@ -43,14 +48,22 @@ export default function Dashboard() {
     };
     
     const handleStr = (e: Event) => {
-      const customEvent = e as CustomEvent<string>;
+      const customEvent = e as CustomEvent<any>;
       if (customEvent.detail) {
-        setStrTransactionId(customEvent.detail);
+        if (typeof customEvent.detail === "string") {
+          setStrTransactionId(customEvent.detail);
+          setStrFallbackTxn(null);
+        } else if (typeof customEvent.detail === "object") {
+          setStrTransactionId(customEvent.detail.id || customEvent.detail.transaction_id || "");
+          setStrFallbackTxn(customEvent.detail.alert || customEvent.detail.txn || customEvent.detail);
+        }
       }
     };
 
     const handleApi409 = () => {
-      setShowIngestPrompt(true);
+      if (!isFusedReady && !pipeline?.dataset_id) {
+        setShowIngestPrompt(true);
+      }
     };
 
     window.addEventListener("nav:section", handleNav);
@@ -61,7 +74,7 @@ export default function Dashboard() {
       window.removeEventListener("pdf:transaction", handleStr);
       window.removeEventListener("api:409", handleApi409);
     };
-  }, []);
+  }, [isFusedReady, pipeline?.dataset_id]);
 
 
   return (
@@ -116,11 +129,12 @@ export default function Dashboard() {
       {strTransactionId && (
         <TransactionSTRReport 
           transactionId={strTransactionId} 
+          fallbackTransaction={strFallbackTxn}
           onClose={handleCloseStr} 
         />
       )}
 
-      {showIngestPrompt && (
+      {showIngestPrompt && !isFusedReady && !pipeline?.dataset_id && !pipelineLoading && activeSection !== "ingestion" && (
         <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center overflow-hidden">
           {/* Background Image with 10-20% blur */}
           <div 

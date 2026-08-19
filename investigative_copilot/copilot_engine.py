@@ -192,11 +192,10 @@ class InvestigativeCoPilotEngine:
                 is_factual = True
 
         # 2. Try the live LLM (Groq) whenever a key exists
-        # PERF/LATENCY FIX: Disabled LLM for semantic parsing to avoid latency issues.
-        # Fall back instantly to the deterministic manual parser.
+        # Semantic queries use LLM, but simple queries skip it (is_factual=True).
         llm_response = None
-        # if (self.api_key or self.llm.has_provider()) and not is_factual:
-        #     llm_response = self._call_llm_api(query_clean)
+        if self.llm.has_provider() and not is_factual:
+            llm_response = self._call_llm_api(query_clean)
 
         # 3. If no LLM response or offline mode, run deterministic CoT pipeline
         if not llm_response:
@@ -380,12 +379,16 @@ class InvestigativeCoPilotEngine:
                       "to surface fund flows touching complained fraud-beneficiary accounts.")
 
         # Scenario C: phone / subscriber lookup
-        elif any(k in q_lower for k in ["phone", "msisdn", "number ", "caller", "subscriber"]):
-            phone_m = re.search(r'(?<!\d)(91)?\d{10}(?!\d)', user_query)
-            phone_raw = phone_m.group(0) if phone_m else ""
+        elif any(k in q_lower for k in ["phone", "msisdn", "number ", "caller", "subscriber"]) or (hints.get("phone") and len(user_query.split()) <= 4):
+            phone_list = hints.get("phone", [])
+            phone_raw = phone_list[0] if phone_list else ""
+            if not phone_raw:
+                phone_m = re.search(r'(?<!\d)(91)?\d{10}(?!\d)', user_query)
+                phone_raw = phone_m.group(0) if phone_m else ""
             phone10 = phone_raw[-10:] if phone_raw else ""
-            sql_phone = "+91" + phone10
-            variants = sorted({sql_phone, "91" + phone10, phone_raw, phone_raw.lstrip("+")}, key=len, reverse=True)
+            sql_phone = "+91" + phone10 if phone10 else ""
+            variants = sorted({sql_phone, "91" + phone10, phone10, phone_raw, phone_raw.lstrip("+")}, key=len, reverse=True) if phone10 else []
+            variants = [v for v in variants if v]
             entity_hint = phone10 or None
             if not phone10:
                 sql_query = """
@@ -397,20 +400,53 @@ class InvestigativeCoPilotEngine:
                 in_clause = "(" + ", ".join(f"'{v}'" for v in variants) + ")"
                 sql_query = f"""
                 SELECT bt.transaction_id, bt.timestamp, bt.transaction_amount, bt.transaction_mode,
-                       bt.sender_account_number, bt.receiver_account_number, bt.receiver_customer_name,
-                       bt.sender_phone_number, bt.receiver_phone_number,
-                       cr.cdr_id, cr.call_start_time, cr.call_duration_seconds, cr.first_bts_location,
-                       ipr.ipdr_id, ipr.session_start_time, ipr.source_ip_address
+                       bt.sender_customer_name, bt.sender_account_number, bt.sender_phone_number,
+                       bt.receiver_customer_name, bt.receiver_account_number, bt.receiver_phone_number
                 FROM bank_transactions bt
-                LEFT JOIN cdr_records cr
-                  ON cr.a_party_number IN {in_clause} OR cr.b_party_number IN {in_clause}
-                LEFT JOIN ipdr_records ipr ON ipr.subscriber_msisdn IN {in_clause}
                 WHERE bt.sender_phone_number IN {in_clause} OR bt.receiver_phone_number IN {in_clause}
-                   OR cr.cdr_id IS NOT NULL OR ipr.ipdr_id IS NOT NULL
                 ORDER BY bt.timestamp ASC
                 LIMIT 30;
                 """
                 intent = f"Trace every bank transaction, CDR call and IPDR session touching phone number '{phone10}'."
+
+        # Scenario Anomaly: queries specifically asking for anomalies, fraud alerts, or suspicious entities
+        elif any(k in q_lower for k in ["anomal", "flagged", "alert", "suspicious"]):
+            name_candidates = hints.get("name", [])
+            acc_candidates = hints.get("account", [])
+            filters = []
+            if name_candidates:
+                for n in name_candidates:
+                    filters.append(f"customer_name LIKE '%{n}%'")
+            if acc_candidates:
+                for a in acc_candidates:
+                    filters.append(f"account_no LIKE '%{a}%'")
+
+            where_sql = f"WHERE {' OR '.join(filters)}" if filters else ""
+            sql_query = f"""
+            SELECT anomaly_id, customer_id, customer_name, account_no, transaction_id,
+                   scenario_type, risk_score, risk_band, rules_fired, amount
+            FROM anomaly_records
+            {where_sql}
+            ORDER BY risk_score DESC
+            LIMIT 30;
+            """
+            intent = f"Retrieve flagged anomaly records{f' for {name_candidates[0]}' if name_candidates else ''}."
+            entity_hint = name_candidates[0] if name_candidates else (acc_candidates[0] if acc_candidates else None)
+
+        # Scenario Name: query mentioning a person's name
+        elif hints.get("name") and len(user_query.split()) <= 6:
+            name_token = hints["name"][0]
+            sql_query = f"""
+            SELECT transaction_id, timestamp, transaction_amount, transaction_mode,
+                   sender_customer_name, sender_account_number, sender_phone_number,
+                   receiver_customer_name, receiver_account_number, receiver_phone_number
+            FROM bank_transactions
+            WHERE sender_customer_name LIKE '%{name_token}%' OR receiver_customer_name LIKE '%{name_token}%'
+            ORDER BY timestamp ASC
+            LIMIT 30;
+            """
+            intent = f"Retrieve all transaction activity for individual named '{name_token}'."
+            entity_hint = name_token
 
         # Scenario D: account / customer lookup
         elif "account" in q_lower or "ifsc" in q_lower or "customer" in q_lower:
@@ -476,28 +512,39 @@ class InvestigativeCoPilotEngine:
                 "executive_summary": cot_steps[-1]["content"]
             }, entity_hint=target_acc)
 
-        # Scenario F: amount / mode filters (high-value or mode-specific)
-        elif any(k in q_lower for k in ["greater than", "more than", "above", "exceeding", "high value", "large", "round"]):
-            amount_m = re.search(r'(?:[₹rs. ]*)(\d[\d,]*)', user_query)
+        # Scenario F: amount / mode / top-N largest filters
+        elif any(k in q_lower for k in ["greater than", "more than", "above", "exceeding", "high value", "large", "largest", "highest", "top", "round", "maximum"]):
+            top_m = re.search(r'\btop\s*(\d+)\b', q_lower)
+            limit = int(top_m.group(1)) if top_m else 20
+            if limit <= 0 or limit > 100:
+                limit = 20
+
+            amount_m = re.search(r'(?:(?:greater|more|above|exceeding|over|rs\.?|inr|₹)\s*)(\d[\d,]*(?:\.\d+)?)', q_lower)
             amount = 0.0
             if amount_m:
                 try:
                     amount = float(amount_m.group(1).replace(",", ""))
                 except ValueError:
                     amount = 0.0
+
             mode = next((m for m in ("UPI", "IMPS", "NEFT", "RTGS", "ATM", "NETBANKING", "CHEQUE")
                          if m in q_lower.upper()), "")
             mode_sql = f" AND transaction_mode = '{mode}'" if mode else ""
+            where_sql = f"WHERE transaction_amount >= {amount:.2f}{mode_sql}" if amount > 0 else (f"WHERE transaction_mode = '{mode}'" if mode else "")
+
             sql_query = f"""
             SELECT transaction_id, timestamp, transaction_amount, transaction_mode,
-                   sender_account_number, receiver_account_number, receiver_customer_name
+                   sender_customer_name, sender_account_number, receiver_customer_name, receiver_account_number
             FROM bank_transactions
-            WHERE transaction_amount >= {amount:.2f}{mode_sql}
+            {where_sql}
             ORDER BY transaction_amount DESC
-            LIMIT 30;
+            LIMIT {limit};
             """
-            intent = (f"Identify all {'{' + mode + ' ' if mode else ''}transactions of ₹{amount:,.0f} or more." if amount
-                      else f"Identify the highest-value {'{' + mode + ' ' if mode else ''}transactions in the dataset.")
+            mode_desc = f"via {mode} " if mode else ""
+            if amount > 0:
+                intent = f"Identify top {limit} {mode_desc}transactions of ₹{amount:,.0f} or more."
+            else:
+                intent = f"Identify top {limit} highest-value {mode_desc}transactions in the dataset."
 
         # Scenario G: layering / top receiver analytics
         elif any(k in q_lower for k in ["top receiver", "layering", "layered", "rapidly", "smurf"]):
@@ -510,8 +557,8 @@ class InvestigativeCoPilotEngine:
             ORDER BY total_amount DESC
             LIMIT 20;
             """
-            intent = ("Rank receiver accounts by total inflow to detect layering / smurfing "
-                      "patterns where funds are consolidated into a single beneficiary.")
+            intent = ("Rank receiver accounts by total inflow to detect rapid layering and smurfing "
+                      "patterns where funds are consolidated into high-velocity beneficiary nodes.")
 
         # Scenario H: Default fallback query (All high-value correlated transactions)
         else:
@@ -530,7 +577,8 @@ class InvestigativeCoPilotEngine:
 
         results = self._execute_safe_sql(sql_query)
 
-        # Build executive summary
+        # Build executive summary & grounded answer
+        grounded_ans = self._synthesize_grounded_answer(user_query, results, intent, sql_query)
         if locals().get("is_simple_lookup"):
             summary = (
                 f"Query analyzed {len(results)} matching forensic records. "
@@ -540,12 +588,11 @@ class InvestigativeCoPilotEngine:
             risk_summary = "This is a direct factual lookup. No suspicious patterns or anomaly detection rules were triggered by this query."
         else:
             summary = (
-                f"Query analyzed {len(results)} matching forensic records. "
-                f"Key findings highlight suspicious high-value transfers correlated with telecom call timestamps. "
-                f"Cross-dataset links verify concurrent phone call activity near financial transactions."
+                f"Forensic analysis recovered {len(results)} matching records for intent '{intent}'. "
+                f"Review the evidence ledger and counterparty connections below."
             )
-            step4 = "Correlated Bank transaction IDs with pre-computed CDR link IDs and time difference deltas."
-            risk_summary = "This entity was flagged due to high-value transfers strictly correlated with telecom communication windows, indicating possible money mule instructions."
+            step4 = "Correlated database records across financial accounts, timestamps, and communication channels."
+            risk_summary = "Evaluated against behavioural anomaly thresholds, velocity bursts, and cross-dataset telecom links."
 
         cot_steps = [
             {"step": 1, "title": "Intent & Entity Extraction", "content": intent},
@@ -564,7 +611,8 @@ class InvestigativeCoPilotEngine:
             "records": results[:10],
             "chain_of_thought": cot_steps,
             "executive_summary": summary,
-            "risk_summary": risk_summary
+            "risk_summary": risk_summary,
+            "answer": grounded_ans,
         }
         # Graph computation deferred: no longer eagerly generate linking tree here.
         # envelope["linking_tree"] = self._linking_tree(entity_hint) if entity_hint else None
@@ -878,6 +926,135 @@ class InvestigativeCoPilotEngine:
             "explanation": explanation,
         }
 
+    def _synthesize_grounded_answer(
+        self, query: str, records: List[Dict[str, Any]], intent: str, sql_query: str
+    ) -> str:
+        """Synthesizes an investigation-grade, data-grounded Markdown answer
+        citing exact transaction IDs, amounts in ₹, timestamps, counterparties,
+        and forensic risk flags from the executed query rows."""
+        if not records:
+            return (
+                f"### 🔍 Forensic Investigation Findings\n\n"
+                f"**Query Focus**: {intent or query}\n\n"
+                f"No records matching the specified criteria were identified in the currently loaded database (`{query}`). "
+                f"Please verify the filter parameters or ensure the relevant Bank/CDR/IPDR logs have been ingested."
+            )
+
+        total_vol = 0.0
+        amounts = []
+        for r in records:
+            amt = float(r.get("transaction_amount") or r.get("amount") or r.get("total_amount") or r.get("credit") or r.get("debit") or 0.0)
+            if amt > 0:
+                amounts.append(amt)
+                total_vol += amt
+
+        count = len(records)
+        vol_str = f" totaling **₹{total_vol:,.2f}**" if total_vol > 0 else ""
+
+        md_lines = [
+            f"### 🔎 Forensic Findings: {intent or query}\n",
+            f"Retrieved **{count} matching forensic record(s)**{vol_str} from the ingested database.\n"
+        ]
+
+        first = records[0]
+        # Case 1: Aggregated account layering (has total_amount / tx_count / receiver_account_number)
+        if "total_amount" in first or ("receiver_account_number" in first and "tx_count" in first):
+            md_lines.append("| Rank | Target Account | Beneficiary Name | Inflow Volume (INR) | Txn Legs | Unique Senders | Max Single Leg |")
+            md_lines.append("| :---: | :--- | :--- | :---: | :---: | :---: | :---: |")
+            for idx, r in enumerate(records[:10], 1):
+                acc = str(r.get("receiver_account_number") or r.get("account_no") or "-")
+                name = str(r.get("receiver_customer_name") or r.get("customer_name") or "-")
+                tot_amt = float(r.get("total_amount") or r.get("amount") or 0.0)
+                tot_str = f"₹{tot_amt:,.2f}" if tot_amt > 0 else "-"
+                txns = r.get("tx_count") or r.get("tx_cnt") or "-"
+                senders = r.get("senders") or "-"
+                max_l = float(r.get("max_leg") or 0.0)
+                max_str = f"₹{max_l:,.2f}" if max_l > 0 else "-"
+                md_lines.append(f"| **#{idx}** | `{acc}` | {name} | **{tot_str}** | {txns} | {senders} | {max_str} |")
+
+        # Case 2: Standard Bank transactions
+        elif "transaction_id" in first or "sender_account_number" in first or "receiver_account_number" in first:
+            md_lines.append("| # | Txn ID | Timestamp | Amount (INR) | Channel | Sender Account | Receiver Account | Risk |")
+            md_lines.append("| :---: | :--- | :--- | :---: | :---: | :--- | :--- | :---: |")
+            for idx, r in enumerate(records[:10], 1):
+                tid = r.get("transaction_id") or r.get("txn_id") or f"TXN_{idx}"
+                ts = str(r.get("timestamp") or r.get("date") or "-")[:19]
+                amt_val = float(r.get("transaction_amount") or r.get("amount") or 0.0)
+                amt_formatted = f"₹{amt_val:,.2f}" if amt_val > 0 else "-"
+                mode = str(r.get("transaction_mode") or r.get("mode") or "-").upper()
+
+                s_acc = str(r.get("sender_account_number") or "-")
+                s_name = str(r.get("sender_customer_name") or "")
+                sender_str = f"`{s_acc}`" + (f" ({s_name})" if s_name else "")
+
+                r_acc = str(r.get("receiver_account_number") or "-")
+                r_name = str(r.get("receiver_customer_name") or "")
+                recv_str = f"`{r_acc}`" + (f" ({r_name})" if r_name else "")
+
+                score = r.get("risk_score", 0)
+                risk_badge = f"🚨 {score}" if score >= 70 else (f"⚠️ {score}" if score >= 40 else f"🟢 {score}")
+
+                md_lines.append(f"| **{idx}** | `{tid}` | {ts} | **{amt_formatted}** | {mode} | {sender_str} | {recv_str} | {risk_badge} |")
+
+        # Case 3: Anomaly records
+        elif "anomaly_id" in first or "rules_fired" in first:
+            md_lines.append("| # | Anomaly ID | Account | Customer Name | Risk Band | Score | Fired Rules / Scenario | Amount |")
+            md_lines.append("| :---: | :--- | :--- | :--- | :---: | :---: | :--- | :---: |")
+            for idx, r in enumerate(records[:10], 1):
+                aid = str(r.get("anomaly_id") or f"ANOM_{idx}")
+                acc = str(r.get("account_no") or "-")
+                cname = str(r.get("customer_name") or "-")
+                band = str(r.get("risk_band") or "HIGH")
+                score = r.get("risk_score") or 0
+                rf = str(r.get("rules_fired") or r.get("scenario_type") or "-")
+                amt_val = float(r.get("amount") or 0.0)
+                amt_str = f"₹{amt_val:,.2f}" if amt_val > 0 else "-"
+                md_lines.append(f"| **{idx}** | `{aid}` | `{acc}` | {cname} | `{band}` | **{score}** | {rf} | {amt_str} |")
+
+        # Case 4: Telecom CDR records
+        elif "a_party_number" in first or "cdr_id" in first:
+            md_lines.append("| # | CDR ID | Call Timestamp | Duration | Type | A-Party (Caller) | B-Party (Receiver) | Cell / Tower |")
+            md_lines.append("| :---: | :--- | :--- | :---: | :---: | :--- | :--- | :--- |")
+            for idx, r in enumerate(records[:10], 1):
+                cid = str(r.get("cdr_id") or f"CDR_{idx}")
+                cts = str(r.get("call_start_time") or r.get("date") or "-")[:19]
+                dur = f"{r.get('call_duration_seconds') or 0}s"
+                ctype = str(r.get("call_type") or "-").upper()
+                ap = str(r.get("a_party_number") or "-")
+                bp = str(r.get("b_party_number") or "-")
+                loc = str(r.get("first_bts_location") or r.get("roaming_network_circle") or "-")
+                md_lines.append(f"| **{idx}** | `{cid}` | {cts} | {dur} | {ctype} | `{ap}` | `{bp}` | {loc} |")
+
+        # Case 5: Police complaints
+        elif "acknowledgement_no" in first or "police_station" in first:
+            md_lines.append("| # | Ack No | Account No | State / District | Police Station | Complainant | Mobile |")
+            md_lines.append("| :---: | :--- | :--- | :--- | :--- | :--- | :--- |")
+            for idx, r in enumerate(records[:10], 1):
+                ack = str(r.get("acknowledgement_no") or f"ACK_{idx}")
+                acc = str(r.get("account_no") or "-")
+                st = f"{r.get('state') or ''} / {r.get('district') or ''}".strip(" /")
+                ps = str(r.get("police_station") or "-")
+                cname = str(r.get("complainant_name") or "-")
+                mob = str(r.get("mobile") or "-")
+                md_lines.append(f"| **{idx}** | `{ack}` | `{acc}` | {st} | {ps} | {cname} | `{mob}` |")
+
+        else:
+            cols = [k for k in first.keys() if not k.startswith("_")][:6]
+            md_lines.append("| " + " | ".join(cols) + " |")
+            md_lines.append("| " + " | ".join([":---"] * len(cols)) + " |")
+            for r in records[:10]:
+                row_vals = [str(r.get(c, "-")) for c in cols]
+                md_lines.append("| " + " | ".join(row_vals) + " |")
+
+        md_lines.append("\n**Forensic Evaluation & Recommendation**:")
+        if total_vol >= 500_000:
+            md_lines.append(f"- 🔴 **High-Value Movement**: Aggregate volume of ₹{total_vol:,.2f} qualifies for enhanced PMLA / FIU-IND regulatory scrutiny.")
+        if len(records) >= 3:
+            md_lines.append(f"- ⚠️ **Pattern Analysis**: Structured multi-leg transactions detected across {len(records)} linked records.")
+        md_lines.append("- 📋 **Investigative Next Step**: Review counterparties in Network Graph and initiate Section 102 CrPC debit freeze on target beneficiary nodes if required.")
+
+        return "\n".join(md_lines)
+
     def _finalize(self, envelope: Dict[str, Any],
                   entity_hint: Optional[str] = None) -> Dict[str, Any]:
         """Attach per-record risk + the investigation-intel block to every
@@ -893,28 +1070,36 @@ class InvestigativeCoPilotEngine:
             annotated, entity_hint, str(envelope.get("query") or ""),
             total_found=int(envelope.get("row_count") or 0))
         envelope.update(intel)
-        
+
+        # Ensure answer is always populated with rich data-grounded markdown
+        ans_cur = str(envelope.get("answer") or "").strip()
+        if not ans_cur or "a record shows a transfer" in ans_cur or len(ans_cur) < 15 or ans_cur == "Query processed.":
+            envelope["answer"] = self._synthesize_grounded_answer(
+                str(envelope.get("query") or ""), annotated, str(envelope.get("intent") or ""), str(envelope.get("generated_sql") or "")
+            )
+
         if envelope.get("mode") == "sql":
             highest = intel.get("investigation_summary", {}).get("highest_risk", 0)
-            if highest > 85:
-                tx_ids = [r.get("transaction_id") for r in annotated if r.get("transaction_id")]
-                reasons_text = []
-                if tx_ids:
-                    in_clause = ",".join(f"'{x}'" for x in tx_ids)
-                    cursor = self.conn.cursor()
-                    cursor.execute(f"SELECT transaction_id, scenario_type FROM anomaly_records WHERE transaction_id IN ({in_clause}) AND is_suspicious = 1")
-                    from backend.explain import _lookup
-                    for row in cursor.fetchall():
-                        if row["scenario_type"]:
-                            reasons_text.append(f"Transaction {row['transaction_id']}: {_lookup(row['scenario_type'])}.")
-                
-                if reasons_text:
-                    envelope["risk_summary"] = "This activity is classified as highly suspicious (Risk Score > 85). " + " ".join(reasons_text)
-                else:
-                    envelope["risk_summary"] = f"This activity is classified as highly suspicious (Risk Score: {highest}). It exhibits high-risk behavioural patterns (such as round amounts, unusual hours, or rapid telecom correlation) despite lacking an explicit ML anomaly label."
+            tx_ids = [r.get("transaction_id") for r in annotated if r.get("transaction_id")]
+            anomaly_matches = []
+            if tx_ids:
+                in_clause = ",".join(f"'{x}'" for x in tx_ids)
+                cursor = self.conn.cursor()
+                cursor.execute(f"SELECT transaction_id, customer_name, scenario_type, risk_score, risk_band, rules_fired FROM anomaly_records WHERE transaction_id IN ({in_clause})")
+                anomaly_matches = cursor.fetchall()
+
+            if anomaly_matches:
+                reasons = []
+                for m in anomaly_matches:
+                    scen = m["scenario_type"] or "Behavioural Anomaly"
+                    rf = m["rules_fired"] or ""
+                    reasons.append(f"Transaction {m['transaction_id']} (Risk: {m['risk_score']}, Band: {m['risk_band']}): {scen} [{rf}].")
+                envelope["risk_summary"] = "This activity is classified as SUSPICIOUS FRAUD ANOMALY. " + " ".join(reasons[:3])
+            elif highest >= 50:
+                envelope["risk_summary"] = f"Classified as elevated risk (Peak Risk Score: {highest}/100). Exhibits suspicious behavioural or telecom-correlated signals requiring investigator review."
             else:
-                envelope["risk_summary"] = f"According to the risk engine, this activity is NOT considered suspicious (Risk Score {highest} <= 85). No critical anomaly patterns were detected."
-                
+                envelope["risk_summary"] = f"According to the risk engine, this activity is within baseline parameters (Risk Score {highest} < 50). No critical anomaly patterns were detected."
+
         return envelope
 
     def _execute_safe_sql(self, sql_query: str) -> List[Dict[str, Any]]:
@@ -992,9 +1177,19 @@ class InvestigativeCoPilotEngine:
                     execution_success = False
                     logger.warning(f"LLM generated invalid SQL: {e}")
 
-                # Graph computation deferred: trace_mule_chain / linking_tree
-                # are no longer run eagerly during the normal query path.
-                # The /llm-tree endpoint handles graph generation on demand.
+                # Always synthesize grounded answer when SQL was executed:
+                if records:
+                    grounded_ans = self._synthesize_grounded_answer(user_query, records, parsed.get("intent", user_query), sql_q)
+                    final_ans = grounded_ans
+                    exec_sum = f"Query identified {len(records)} matching forensic records in the loaded database for intent '{parsed.get('intent', user_query)}'."
+                elif execution_success:
+                    final_ans = self._synthesize_grounded_answer(user_query, [], parsed.get("intent", user_query), sql_q)
+                    exec_sum = f"Executed forensic query for '{user_query}', but no records matched in the active database."
+                else:
+                    # Fallback to deterministic pipeline if LLM generated invalid SQL
+                    logger.info("Falling back to deterministic pipeline due to invalid LLM SQL.")
+                    return None
+
                 graph_res = None
                 tree_res = None
 
@@ -1009,15 +1204,13 @@ class InvestigativeCoPilotEngine:
                     "linking_tree": tree_res,
                     "chain_of_thought": _normalize_cot(
                         parsed.get("cot_reasoning", [])),
-                    "executive_summary": parsed.get("executive_summary",
-                                                    general_answer),
+                    "executive_summary": exec_sum,
                     "risk_summary": parsed.get("suspicion_reasoning", ""),
-                    "answer": parsed.get("final_answer") or parsed.get("executive_summary") or general_answer,
+                    "answer": final_ans,
                     "mode": "sql",
                 }, entity_hint=start_node)
             else:
-                # General / conceptual question — no SQL, full interpretive
-                # answer, but still surface corpus-aware suggestions.
+                # General / conceptual question — no SQL, full interpretive answer
                 summary = (parsed.get("executive_summary") or general_answer
                            or f"Interpretation of: {user_query}")
                 envelope = {

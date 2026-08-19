@@ -20,7 +20,6 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
-import { toast } from "sonner";
 
 const TOKEN_KEY = "backend_token";
 const USER_KEY = "backend_user";
@@ -43,13 +42,13 @@ const AuthContext = createContext<AuthState | null>(null);
 
 function readToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.sessionStorage.getItem(TOKEN_KEY);
+  return window.localStorage.getItem(TOKEN_KEY);
 }
 
 function readUser(): AuthUser | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.sessionStorage.getItem(USER_KEY);
+    const raw = window.localStorage.getItem(USER_KEY);
     return raw ? (JSON.parse(raw) as AuthUser) : null;
   } catch {
     return null;
@@ -65,39 +64,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
 
   useEffect(() => {
-    const t = window.sessionStorage.getItem(TOKEN_KEY);
-    if (!t) return;
+    const t = window.localStorage.getItem(TOKEN_KEY);
+    
+    const handle401 = () => {
+      window.localStorage.removeItem(TOKEN_KEY);
+      window.localStorage.removeItem(USER_KEY);
+      setToken(null);
+      setUser(null);
+      if (typeof window !== "undefined") {
+          window.location.href = "/login";
+      }
+    };
+    window.addEventListener("api:401", handle401);
+
+    if (!t) {
+        setReady(true);
+        return () => window.removeEventListener("api:401", handle401);
+    }
+    
     api
       .me()
       .then((me) => setUser(me.user))
       .catch(() => {
-        window.sessionStorage.removeItem(TOKEN_KEY);
-        window.sessionStorage.removeItem(USER_KEY);
-        setToken(null);
-        setUser(null);
+        handle401();
       })
       .finally(() => setReady(true));
-  }, []);
-
-  useEffect(() => {
-    const handle401 = () => {
-      window.sessionStorage.removeItem(TOKEN_KEY);
-      window.sessionStorage.removeItem(USER_KEY);
-      setToken(null);
-      setUser(null);
-      toast.error("Session expired or token invalid. Please sign in again.");
-      router.replace("/login");
-    };
-    window.addEventListener("api:401", handle401);
+      
     return () => window.removeEventListener("api:401", handle401);
-  }, [router]);
-
+  }, []);
 
   const login = useCallback(
     async (username: string, password: string) => {
       const res = await api.login(username, password);
-      window.sessionStorage.setItem(TOKEN_KEY, res.access_token);
-      window.sessionStorage.setItem(USER_KEY, JSON.stringify(res.user));
+      window.localStorage.setItem(TOKEN_KEY, res.access_token);
+      window.localStorage.setItem(USER_KEY, JSON.stringify(res.user));
       setToken(res.access_token);
       setUser(res.user);
       return res.user;
@@ -107,24 +107,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const register = useCallback(
     async (username: string, password: string) => {
-      const res = await api.register(username, password);
-      window.sessionStorage.setItem(TOKEN_KEY, res.access_token);
-      window.sessionStorage.setItem(USER_KEY, JSON.stringify(res.user));
-      setToken(res.access_token);
-      setUser(res.user);
-      return res.user;
+      await api.register(username, password);
+      return login(username, password);
     },
-    []
+    [login]
   );
-
 
   const logout = useCallback(() => {
     // Session reset: tell the backend to drop the loaded (transient) data so
     // the next login starts fresh. Fire-and-forget — local logout proceeds
     // even if the backend is unreachable.
     api.logout().catch(() => undefined);
-    window.sessionStorage.removeItem(TOKEN_KEY);
-    window.sessionStorage.removeItem(USER_KEY);
+    window.localStorage.removeItem(TOKEN_KEY);
+    window.localStorage.removeItem(USER_KEY);
     setToken(null);
     setUser(null);
     router.replace("/login");

@@ -68,6 +68,8 @@ tempCodeRunnerFile.py
 # NODE / FRONTEND
 # ------------------------------------------------------------
 node_modules/
+.next/
+frontend/.next/
 frontend/dist/
 frontend/.vite/
 .npm

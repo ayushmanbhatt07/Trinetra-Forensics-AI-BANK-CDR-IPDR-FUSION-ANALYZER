@@ -25,7 +25,7 @@ def generate_features(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         
     for acct, txns in accounts.items():
         # Sort by timestamp
-        txns.sort(key=lambda x: x.get("ts", 0))
+        txns.sort(key=lambda x: float(x.get("ts") or 0.0))
         
         amounts = []
         debits = []
@@ -81,7 +81,7 @@ def generate_features(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             
             # 5. Velocity & Burst (Txns in last 24h)
             day_ago = ts - 86400
-            recent = [t for t in txns[:i+1] if t.get("ts", 0) >= day_ago]
+            recent = [t for t in txns[:i+1] if float(t.get("ts") or 0.0) >= day_ago]
             txn["feat_daily_txns"] = len(recent)
             txn["feat_daily_spend"] = sum(float(t.get("debit") or 0.0) for t in recent)
             txn["feat_burst_indicator"] = 1 if len(recent) > 15 else 0
@@ -91,7 +91,7 @@ def generate_features(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             
             # 7. Dormant Activation
             if i > 0:
-                prev_ts = float(txns[i-1].get("ts", 0))
+                prev_ts = float(txns[i-1].get("ts") or 0.0)
                 days_since = (ts - prev_ts) / 86400 if prev_ts > 0 else 0
                 txn["feat_days_since_last_txn"] = round(days_since, 2)
                 txn["feat_dormant_activation"] = 1 if days_since > 30 else 0

@@ -46,14 +46,8 @@ DEFAULTS = {
     "DETECT_MIN_CONFIDENCE": "0.55",
     "ANOMALY_CONTAMINATION": "0.05",
     "MAX_UPLOAD_FILES": "50",
-    "SQLITE_DB_NAME": "backend.db",
-    "PIPELINE_MODE": "production_safe",
+    "CLEAR_ON_STARTUP": "0",
 }
-
-
-def sqlite_db_name() -> str:
-    return _get("SQLITE_DB_NAME", "backend.db").strip()
-
 
 
 def _get(key: str, default: str | None = None) -> str:
@@ -76,23 +70,41 @@ def _float(key: str, default: float) -> float:
 
 
 def data_dir() -> Path:
-    d = Path(_get("DATA_DIR")).expanduser().resolve()
+    val = _get("DATA_DIR")
+    p = Path(val).expanduser()
+    if not p.is_absolute():
+        backend_p = Path(__file__).resolve().parent / val.lstrip("./")
+        root_p = Path(__file__).resolve().parent.parent / val.lstrip("./")
+        if (backend_p / "backend.db").exists():
+            p = backend_p
+        elif (root_p / "backend.db").exists():
+            p = root_p
+        elif backend_p.exists():
+            p = backend_p
+        else:
+            p = root_p
+    d = p.resolve()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def case_dir() -> Path:
-    d = Path(_get("CASE_DIR")).expanduser().resolve()
+    val = _get("CASE_DIR")
+    p = Path(val).expanduser()
+    if not p.is_absolute():
+        backend_p = Path(__file__).resolve().parent / val.lstrip("./")
+        root_p = Path(__file__).resolve().parent.parent / val.lstrip("./")
+        if backend_p.exists():
+            p = backend_p
+        else:
+            p = root_p
+    d = p.resolve()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def cors_origins() -> list[str]:
-    raw = _get("CORS_ORIGINS", "")
-    origins = [o.strip() for o in raw.split(",") if o.strip()]
-    if not origins:
-        return ["*"]
-    return origins
+    return [o.strip() for o in _get("CORS_ORIGINS").split(",") if o.strip()]
 
 
 def api_host() -> str:
@@ -124,7 +136,7 @@ def ingest_timeout_sec() -> int:
 
 
 def parser_threads() -> int:
-    return max(1, _int("PARSER_THREADS", 1))
+    return max(1, _int("PARSER_THREADS", 4))
 
 
 def detect_min_confidence() -> float:
@@ -139,8 +151,8 @@ def max_upload_files() -> int:
     return max(1, _int("MAX_UPLOAD_FILES", 50))
 
 
-def pipeline_mode() -> str:
-    return _get("PIPELINE_MODE", "production_safe")
+def clear_on_startup() -> bool:
+    return _get("CLEAR_ON_STARTUP", "1").lower() in ("1", "true", "yes", "on")
 
 
 def groq_api_keys() -> list[str]:

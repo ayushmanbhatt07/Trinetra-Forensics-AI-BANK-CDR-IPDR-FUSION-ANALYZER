@@ -124,6 +124,20 @@ def load_bundle() -> dict | None:
     return out
 
 
+def clear_bundle() -> None:
+    """Drop all persisted bundle tables and pipeline jobs from SQLite."""
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM bundle")
+                conn.execute("DELETE FROM pipeline_jobs")
+                conn.execute("DELETE FROM findings")
+                conn.execute("DELETE FROM investigations")
+        finally:
+            conn.close()
+
+
 def save_pipeline_job(job: dict) -> None:
     """Upsert a pipeline job into the database."""
     with _lock:
@@ -189,16 +203,6 @@ def last_ingested() -> str | None:
         finally:
             conn.close()
     return row[0] if row else None
-
-
-def clear_bundle() -> None:
-    with _lock:
-        conn = _connect()
-        try:
-            with conn:
-                conn.execute("DELETE FROM bundle")
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
