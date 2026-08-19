@@ -8,8 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from backend import store
 from backend import config
 
-import logging
-
 _log = logging.getLogger(__name__)
 
 class PipelineOrchestrator:
@@ -178,29 +176,40 @@ class PipelineOrchestrator:
                 "stage": "FUSING",
                 "progress": 25
             })
-            _log.info(f"[PIPELINE] job={job_id} stage=FUSING")
+            _log.info(f"[PIPELINE] job={job_id} stage=FUSING (Starting concurrent Fusion & Scoring)")
             
-            # Step 1: Fusion
-            cached_fused_base(bundle)
-            cached_build_timeline(bundle)
+            from concurrent.futures import ThreadPoolExecutor
             
-            self._update_job(job_id, {
-                "status": "FUSED_READY",
-                "stage": "FUSED_READY",
-                "progress": 40,
-                "fused_ready": True
-            })
-            _log.info(f"[PIPELINE] job={job_id} stage=FUSED_READY elapsed={time.time() - t0:.2f}s")
+            def _run_fusion():
+                cached_fused_base(bundle)
+                cached_build_timeline(bundle)
             
-            # Step 2: Scoring
-            self._update_job(job_id, {
-                "status": "SCORING",
-                "stage": "SCORING",
-                "progress": 50
-            })
-            _log.info(f"[PIPELINE] job={job_id} stage=SCORING")
-            
-            hybrid.hybrid_analyze(bundle)
+            def _run_scoring():
+                hybrid.hybrid_analyze(bundle)
+                
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fut_fuse = ex.submit(_run_fusion)
+                fut_score = ex.submit(_run_scoring)
+                
+                # Step 1: Wait for Fusion to finish first (so UI can show fused data)
+                fut_fuse.result()
+                self._update_job(job_id, {
+                    "status": "FUSED_READY",
+                    "stage": "FUSED_READY",
+                    "progress": 40,
+                    "fused_ready": True
+                })
+                _log.info(f"[PIPELINE] job={job_id} stage=FUSED_READY elapsed={time.time() - t0:.2f}s")
+                
+                # Step 2: Now wait for Scoring (which has been running in parallel)
+                self._update_job(job_id, {
+                    "status": "SCORING",
+                    "stage": "SCORING",
+                    "progress": 50
+                })
+                _log.info(f"[PIPELINE] job={job_id} stage=SCORING (waiting for parallel execution)")
+                
+                fut_score.result()
             
             self._update_job(job_id, {
                 "status": "ANOMALIES_READY",

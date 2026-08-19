@@ -38,7 +38,7 @@ from ..behavioural import score_transactions
 from ..fusion import fraud_heat
 from .ensemble import ensemble_scores
 from .features import txn_ml_scores
-from .graph_features import graph_features
+from .graph_features import graph_features, graph_score as _batch_graph_score
 from .internet import internet_scores
 from .moneyflow import money_flow_analysis
 from .profiles import account_profile_deviation, profile_deviation
@@ -107,20 +107,73 @@ def _compute(bundle: dict) -> dict:
     # ---- Group 1: Fully independent engines run in parallel ----------------
     # These engines only need `bundle` as input. They have no data dependencies
     # on each other and can safely run concurrently.
-    from concurrent.futures import ThreadPoolExecutor, wait, FIRST_EXCEPTION
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    g1_results: dict = {}
+    g1_results: dict = {
+        "behavioural": [], "heat": {"accounts": []}, "ens": {"accounts": [], "detectors": []},
+        "tml": {}, "prof_txn": {}, "prof_acc": {}, "temporal_txn": {}, "acc_temporal": {},
+        "telecom": {"txn": {}, "phone": {}}, "internet": {"txn": {}, "ip": {}}
+    }
 
-    def _run_behavioural(): return ("behavioural", score_transactions(bundle))
-    def _run_heat(): return ("heat", fraud_heat(bundle))
-    def _run_ensemble(): return ("ens", ensemble_scores(bundle))
-    def _run_txn_ml(): return ("tml", txn_ml_scores(bundle))
-    def _run_prof_txn(): return ("prof_txn", profile_deviation(bundle))
-    def _run_prof_acc(): return ("prof_acc", account_profile_deviation(bundle))
-    def _run_temporal_txn(): return ("temporal_txn", txn_temporal_scores(bundle))
-    def _run_temporal_acc(): return ("acc_temporal", account_temporal_scores(bundle))
-    def _run_telecom(): return ("telecom", telecom_scores(bundle))
-    def _run_internet(): return ("internet", internet_scores(bundle))
+    def _run_behavioural():
+        try: return ("behavioural", score_transactions(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] score_transactions failed: %s", e)
+            return ("behavioural", [])
+
+    def _run_heat():
+        try: return ("heat", fraud_heat(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] fraud_heat failed: %s", e)
+            return ("heat", {"accounts": []})
+
+    def _run_ensemble():
+        try: return ("ens", ensemble_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] ensemble_scores failed: %s", e)
+            return ("ens", {"accounts": [], "detectors": []})
+
+    def _run_txn_ml():
+        try: return ("tml", txn_ml_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] txn_ml_scores failed: %s", e)
+            return ("tml", {})
+
+    def _run_prof_txn():
+        try: return ("prof_txn", profile_deviation(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] profile_deviation failed: %s", e)
+            return ("prof_txn", {})
+
+    def _run_prof_acc():
+        try: return ("prof_acc", account_profile_deviation(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] account_profile_deviation failed: %s", e)
+            return ("prof_acc", {})
+
+    def _run_temporal_txn():
+        try: return ("temporal_txn", txn_temporal_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] txn_temporal_scores failed: %s", e)
+            return ("temporal_txn", {})
+
+    def _run_temporal_acc():
+        try: return ("acc_temporal", account_temporal_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] account_temporal_scores failed: %s", e)
+            return ("acc_temporal", {})
+
+    def _run_telecom():
+        try: return ("telecom", telecom_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] telecom_scores failed: %s", e)
+            return ("telecom", {"txn": {}, "phone": {}})
+
+    def _run_internet():
+        try: return ("internet", internet_scores(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] internet_scores failed: %s", e)
+            return ("internet", {"txn": {}, "ip": {}})
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         futs = [
@@ -135,9 +188,12 @@ def _compute(bundle: dict) -> dict:
             executor.submit(_run_telecom),
             executor.submit(_run_internet),
         ]
-        for f in futs:
-            key, val = f.result()  # re-raises any exceptions from workers
-            g1_results[key] = val
+        for f in as_completed(futs):
+            try:
+                key, val = f.result()
+                g1_results[key] = val
+            except Exception as e:
+                logger.warning("[HYBRID] G1 worker raised unhandled: %s", e)
 
     behavioural = g1_results["behavioural"]
     heat = g1_results["heat"]
@@ -150,24 +206,45 @@ def _compute(bundle: dict) -> dict:
     telecom = g1_results["telecom"]
     internet = g1_results["internet"]
 
-    heat_by_acc = {a["account_no"]: a for a in heat["accounts"]}
-    ens_by_acc = {a["account_no"]: a for a in ens["accounts"]}
+    heat_by_acc = {a["account_no"]: a for a in heat.get("accounts", [])}
+    ens_by_acc = {a["account_no"]: a for a in ens.get("accounts", [])}
 
     # ---- Group 2: Engines that depend on group 1 results -------------------
-    def _run_moneyflow(): return ("moneyflow", money_flow_analysis(bundle))
-    def _run_entity(): return ("entity", entity_risk(bundle))
-    def _run_graph(): return ("gfeats", graph_features(bundle))
+    def _run_moneyflow():
+        try: return ("moneyflow", money_flow_analysis(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] money_flow_analysis failed: %s", e)
+            return ("moneyflow", {"accounts": {}, "transactions": {}})
 
+    def _run_entity():
+        try: return ("entity", entity_risk(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] entity_risk failed: %s", e)
+            return ("entity", {"account_exposure": {}, "entities": {}})
+
+    def _run_graph():
+        try: return ("gfeats", graph_features(bundle))
+        except Exception as e:
+            logger.warning("[HYBRID] graph_features failed: %s", e)
+            return ("gfeats", ({}, {}))
+
+    g2_results: dict = {
+        "moneyflow": {"accounts": {}, "transactions": {}},
+        "entity": {"account_exposure": {}, "entities": {}},
+        "gfeats": ({}, {})
+    }
     with ThreadPoolExecutor(max_workers=3) as executor:
         futs2 = [
             executor.submit(_run_moneyflow),
             executor.submit(_run_entity),
             executor.submit(_run_graph),
         ]
-        g2_results: dict = {}
-        for f in futs2:
-            key, val = f.result()
-            g2_results[key] = val
+        for f in as_completed(futs2):
+            try:
+                key, val = f.result()
+                g2_results[key] = val
+            except Exception as e:
+                logger.warning("[HYBRID] G2 worker raised unhandled: %s", e)
 
     moneyflow = g2_results["moneyflow"]
     entity = g2_results["entity"]
@@ -189,6 +266,10 @@ def _compute(bundle: dict) -> dict:
     acc_scen = scenarios["account"]
     flow_by_acc = moneyflow["accounts"]
     ent_by_acc = entity["account_exposure"]
+
+    # Pre-compute graph scores for ALL accounts in one batch (avoids
+    # re-normalising per account which was the old per-account bottleneck).
+    all_graph_scores = _batch_graph_score(gfeats) if gfeats else {}
 
     hw = hybrid_weights()
     w_trules, w_tml, w_tbeh = hw.get("txn_rules", 0.30), hw.get("txn_ml", 0.20), hw.get("txn_behaviour", 0.25)
@@ -254,7 +335,7 @@ def _compute(bundle: dict) -> dict:
             "acc_ml": ml,
             "acc_behaviour": float(beh.get("behaviour_score", 0.0)),
             "acc_temporal": float(temp.get("temporal_score", 0.0)),
-            "acc_graph": float(_graph_score(graph)),
+            "acc_graph": float(all_graph_scores.get(acc, 0.0)),
             "acc_entity": float(ent.get("entity_risk", 0.0)),
             "acc_moneyflow": float(flow.get("flow_score", 0.0)),
         }, weights=hw)
@@ -267,7 +348,7 @@ def _compute(bundle: dict) -> dict:
                 "ml_ensemble": round(ml, 2),
                 "behaviour": round(float(beh.get("behaviour_score", 0.0)), 2),
                 "temporal": round(float(temp.get("temporal_score", 0.0)), 2),
-                "graph": round(float(_graph_score(graph)), 2),
+                "graph": round(float(all_graph_scores.get(acc, 0.0)), 2),
                 "entity": round(float(ent.get("entity_risk", 0.0)), 2),
                 "moneyflow": round(float(flow.get("flow_score", 0.0)), 2),
             },
@@ -312,9 +393,12 @@ def _compute(bundle: dict) -> dict:
                 "ncrp": ent["ncrp"],
                 "reasons": ent["reasons"],
             }
+    scored_sorted = list(transactions.values())
+    scored_sorted.sort(key=lambda r: (-r.get("risk_score", 0.0), r.get("risk_band", "")))
 
     return {
         "transactions": transactions,
+        "sorted_transactions": scored_sorted,
         "accounts": accounts,
         "entities": entities,
         "scenarios": scenarios,

@@ -21,118 +21,118 @@ class CopilotGraphEngine:
         cursor = self.conn.cursor()
 
         # 1. Add Bank Transaction Edges (Account -> Account)
-        cursor.execute("""
-            SELECT sender_account_number, sender_customer_name, sender_phone_number,
-                   receiver_account_number, receiver_customer_name, receiver_phone_number,
-                   transaction_amount, timestamp, transaction_id, transaction_mode
-            FROM bank_transactions
-        """)
-        tx_rows = cursor.fetchall()
-        for row in tx_rows:
-            r = dict(row)
-            s_acc = str(r["sender_account_number"]) if r["sender_account_number"] else None
-            r_acc = str(r["receiver_account_number"]) if r["receiver_account_number"] else None
-            
-            if s_acc:
-                self.graph.add_node(s_acc, type="account", name=r.get("sender_customer_name"), phone=r.get("sender_phone_number"))
-                s_phone = str(r["sender_phone_number"]) if r.get("sender_phone_number") else None
-                if s_phone and s_phone.strip() and s_phone != "nan":
-                    self.graph.add_node(s_phone, type="phone")
-                    self.graph.add_edge(s_acc, s_phone, edge_type="account_phone_link")
+        try:
+            cursor.execute("""
+                SELECT sender_account_number, sender_customer_name, sender_phone_number,
+                       receiver_account_number, receiver_customer_name, receiver_phone_number,
+                       transaction_amount, timestamp, transaction_id, transaction_mode
+                FROM bank_transactions
+            """)
+            tx_rows = cursor.fetchall()
+            for row in tx_rows:
+                r = dict(row)
+                s_acc = str(r["sender_account_number"]) if r["sender_account_number"] else None
+                r_acc = str(r["receiver_account_number"]) if r["receiver_account_number"] else None
 
-            if r_acc:
-                self.graph.add_node(r_acc, type="account", name=r.get("receiver_customer_name"), phone=r.get("receiver_phone_number"))
-                r_phone = str(r["receiver_phone_number"]) if r.get("receiver_phone_number") else None
-                if r_phone and r_phone.strip() and r_phone != "nan":
-                    self.graph.add_node(r_phone, type="phone")
-                    self.graph.add_edge(r_acc, r_phone, edge_type="account_phone_link")
+                if s_acc:
+                    self.graph.add_node(s_acc, type="account", name=r.get("sender_customer_name"), phone=r.get("sender_phone_number"))
+                    s_phone = str(r["sender_phone_number"]) if r.get("sender_phone_number") else None
+                    if s_phone and s_phone.strip() and s_phone != "nan":
+                        self.graph.add_node(s_phone, type="phone")
+                        self.graph.add_edge(s_acc, s_phone, edge_type="account_phone_link")
 
-            if s_acc and r_acc:
-                tx_id = str(r["transaction_id"]) if r.get("transaction_id") else None
-                amt = float(r["transaction_amount"]) if r.get("transaction_amount") is not None else 0.0
-                ts = str(r.get("timestamp") or "")
-                mode = str(r.get("transaction_mode") or "")
-                
-                # Add direct bank transfer edge between accounts for money flow branches
-                self.graph.add_edge(
-                    s_acc, r_acc,
-                    edge_type="bank_transfer",
-                    amount=amt,
-                    timestamp=ts,
-                    tx_id=tx_id or "",
-                    mode=mode
-                )
+                if r_acc:
+                    self.graph.add_node(r_acc, type="account", name=r.get("receiver_customer_name"), phone=r.get("receiver_phone_number"))
+                    r_phone = str(r["receiver_phone_number"]) if r.get("receiver_phone_number") else None
+                    if r_phone and r_phone.strip() and r_phone != "nan":
+                        self.graph.add_node(r_phone, type="phone")
+                        self.graph.add_edge(r_acc, r_phone, edge_type="account_phone_link")
 
-                # Add Txn node as an addon node attached to accounts
-                if tx_id:
-                    self.graph.add_node(tx_id, type="txn", name=f"Txn {tx_id}", amount=amt, timestamp=ts, mode=mode)
-                    self.graph.add_edge(s_acc, tx_id, edge_type="bank_transfer", amount=amt, tx_id=tx_id)
-                    self.graph.add_edge(tx_id, r_acc, edge_type="bank_transfer", amount=amt, tx_id=tx_id)
+                if s_acc and r_acc:
+                    # Add directed money flow edge
+                    self.graph.add_edge(
+                        s_acc, r_acc,
+                        edge_type="bank_transfer",
+                        amount=float(r["transaction_amount"]) if r["transaction_amount"] is not None else 0.0,
+                        timestamp=str(r["timestamp"]),
+                        tx_id=str(r["transaction_id"]),
+                        mode=str(r["transaction_mode"])
+                    )
+        except Exception as e:
+            logger.debug("Graph bank edges skipped: %s", e)
 
         # 2. Add CDR Call Edges (Phone -> Phone)
-        cursor.execute("""
-            SELECT a_party_number, b_party_number, call_duration_seconds,
-                   call_start_time, cdr_id, first_bts_location, call_type
-            FROM cdr_records
-        """)
-        for row in cursor.fetchall():
-            a_num = str(row["a_party_number"]) if row["a_party_number"] else None
-            b_num = str(row["b_party_number"]) if row["b_party_number"] else None
+        try:
+            cursor.execute("""
+                SELECT a_party_number, b_party_number, call_duration_seconds,
+                       call_start_time, cdr_id, first_bts_location, call_type
+                FROM cdr_records
+            """)
+            for row in cursor.fetchall():
+                a_num = str(row["a_party_number"]) if row["a_party_number"] else None
+                b_num = str(row["b_party_number"]) if row["b_party_number"] else None
 
-            if a_num and b_num:
-                self.graph.add_node(a_num, type="phone")
-                self.graph.add_node(b_num, type="phone")
-                
-                self.graph.add_edge(
-                    a_num, b_num,
-                    edge_type="cdr_call",
-                    duration=int(row["call_duration_seconds"]) if row["call_duration_seconds"] is not None else 0,
-                    timestamp=str(row["call_start_time"]),
-                    cdr_id=str(row["cdr_id"]),
-                    bts=str(row["first_bts_location"]),
-                    call_type=str(row["call_type"])
-                )
+                if a_num and b_num:
+                    self.graph.add_node(a_num, type="phone")
+                    self.graph.add_node(b_num, type="phone")
+
+                    self.graph.add_edge(
+                        a_num, b_num,
+                        edge_type="cdr_call",
+                        duration=int(row["call_duration_seconds"]) if row["call_duration_seconds"] is not None else 0,
+                        timestamp=str(row["call_start_time"]),
+                        cdr_id=str(row["cdr_id"]),
+                        bts=str(row["first_bts_location"]),
+                        call_type=str(row["call_type"])
+                    )
+        except Exception as e:
+            logger.debug("Graph CDR edges skipped: %s", e)
 
         # 3. Add Bank-CDR Correlated Edges
-        cursor.execute("""
-            SELECT transaction_id, cdr_id, time_difference_seconds, is_correlated
-            FROM bank_cdr_links
-            WHERE is_correlated = 1 OR is_correlated = '1'
-        """)
-        for row in cursor.fetchall():
-            tx_id = str(row["transaction_id"])
-            cdr_id = str(row["cdr_id"])
-            
-            # Find tx sender/receiver and cdr A/B numbers
-            c_tx = self.conn.cursor()
-            c_tx.execute("SELECT sender_account_number, receiver_account_number FROM bank_transactions WHERE transaction_id = ?", (tx_id,))
-            tx_row = c_tx.fetchone()
-            
-            c_cdr = self.conn.cursor()
-            c_cdr.execute("SELECT a_party_number, b_party_number FROM cdr_records WHERE cdr_id = ?", (cdr_id,))
-            cdr_row = c_cdr.fetchone()
-            
-            if tx_row and cdr_row:
-                acc = str(tx_row["receiver_account_number"]) or str(tx_row["sender_account_number"])
-                phone = str(cdr_row["a_party_number"]) or str(cdr_row["b_party_number"])
-                if acc in self.graph and phone in self.graph:
-                    self.graph.add_edge(
-                        acc, phone,
-                        edge_type="correlated_event",
-                        tx_id=tx_id,
-                        cdr_id=cdr_id,
-                        delta_sec=float(row["time_difference_seconds"]) if row["time_difference_seconds"] is not None else 0.0
-                    )
+        try:
+            cursor.execute("""
+                SELECT transaction_id, cdr_id, time_difference_seconds, is_correlated
+                FROM bank_cdr_links
+                WHERE is_correlated = 1 OR is_correlated = '1'
+            """)
+            for row in cursor.fetchall():
+                tx_id = str(row["transaction_id"])
+                cdr_id = str(row["cdr_id"])
+
+                c_tx = self.conn.cursor()
+                c_tx.execute("SELECT sender_account_number, receiver_account_number FROM bank_transactions WHERE transaction_id = ?", (tx_id,))
+                tx_row = c_tx.fetchone()
+
+                c_cdr = self.conn.cursor()
+                c_cdr.execute("SELECT a_party_number, b_party_number FROM cdr_records WHERE cdr_id = ?", (cdr_id,))
+                cdr_row = c_cdr.fetchone()
+
+                if tx_row and cdr_row:
+                    acc = str(tx_row["receiver_account_number"]) or str(tx_row["sender_account_number"])
+                    phone = str(cdr_row["a_party_number"]) or str(cdr_row["b_party_number"])
+                    if acc in self.graph and phone in self.graph:
+                        self.graph.add_edge(
+                            acc, phone,
+                            edge_type="correlated_event",
+                            tx_id=tx_id,
+                            cdr_id=cdr_id,
+                            delta_sec=float(row["time_difference_seconds"]) if row["time_difference_seconds"] is not None else 0.0
+                        )
+        except Exception as e:
+            logger.debug("Graph Bank-CDR edges skipped: %s", e)
 
         # 4. Add IPDR Edges
-        cursor.execute("SELECT subscriber_msisdn, destination_ip_address FROM ipdr_records")
-        for row in cursor.fetchall():
-            msisdn = str(row["subscriber_msisdn"]) if row["subscriber_msisdn"] else None
-            ip = str(row["destination_ip_address"]) if row["destination_ip_address"] else None
-            if msisdn and ip and msisdn.strip() != "None" and ip.strip() != "None":
-                self.graph.add_node(msisdn, type="phone")
-                self.graph.add_node(ip, type="ip")
-                self.graph.add_edge(msisdn, ip, edge_type="ip_session", timestamp="")
+        try:
+            cursor.execute("SELECT subscriber_msisdn, destination_ip_address FROM ipdr_records")
+            for row in cursor.fetchall():
+                msisdn = str(row["subscriber_msisdn"]) if row["subscriber_msisdn"] else None
+                ip = str(row["destination_ip_address"]) if row["destination_ip_address"] else None
+                if msisdn and ip and msisdn.strip() != "None" and ip.strip() != "None":
+                    self.graph.add_node(msisdn, type="phone")
+                    self.graph.add_node(ip, type="ip")
+                    self.graph.add_edge(msisdn, ip, edge_type="ip_session", timestamp="")
+        except Exception as e:
+            logger.debug("Graph IPDR edges skipped: %s", e)
 
         # 5. Add IMEI Edges
         try:
@@ -156,13 +156,12 @@ class CopilotGraphEngine:
         # 1. Resolve Transaction ID -> Account Node
         if start_node not in self.graph:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT transaction_id, receiver_account_number, sender_account_number FROM bank_transactions WHERE transaction_id = ?", (start_node,))
+            cursor.execute("SELECT receiver_account_number, sender_account_number FROM bank_transactions WHERE transaction_id = ?", (start_node,))
             row_tx = cursor.fetchone()
             if row_tx:
-                tx_id = str(row_tx["transaction_id"])
                 rec_acc = str(row_tx["receiver_account_number"]) if row_tx["receiver_account_number"] else None
                 send_acc = str(row_tx["sender_account_number"]) if row_tx["sender_account_number"] else None
-                start_node = tx_id if tx_id in self.graph else (rec_acc or send_acc or start_node)
+                start_node = rec_acc or send_acc or start_node
 
         # 2. Resolve CDR ID -> Phone Node
         if start_node not in self.graph:

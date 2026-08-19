@@ -110,32 +110,38 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
           }
         }
 
-        // Only continue polling if actively processing (not yet at a terminal state)
-        const isTerminal =
-          !res ||
-          res.ready ||
-          TERMINAL_STAGES.has(res.status);
-
-        if (!isTerminal) {
-          // Fast responsive polling during active processing stages (PARSING, FUSING, SCORING, GRAPHS)
-          const interval = 600;
-          timerRef.current = setTimeout(poll, interval);
-        }
+        // Active processing stages poll at 800ms; steady state maintains a 5000ms background heartbeat
+        const isProcessingStage = Boolean(res && !res.ready && !TERMINAL_STAGES.has(res.status));
+        const interval = isProcessingStage ? 800 : 5000;
+        timerRef.current = setTimeout(poll, interval);
       } catch {
         if (!isActiveRef.current) return;
         setLoading(false);
-        // On error, retry in 3000ms
         timerRef.current = setTimeout(poll, 3000);
       }
     };
 
     poll();
 
+    const onVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        fetchStatus();
+      }
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("visibilitychange", onVisibilityChange);
+      window.addEventListener("focus", onVisibilityChange);
+    }
+
     return () => {
       isActiveRef.current = false;
       if (timerRef.current !== undefined) clearTimeout(timerRef.current);
+      if (typeof window !== "undefined") {
+        window.removeEventListener("visibilitychange", onVisibilityChange);
+        window.removeEventListener("focus", onVisibilityChange);
+      }
     };
-  }, [user, pollTrigger]);
+  }, [user, pollTrigger, fetchStatus]);
 
   const refetchPipeline = useCallback(async () => {
     setPollTrigger((t) => t + 1);

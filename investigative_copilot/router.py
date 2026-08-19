@@ -1,6 +1,6 @@
 """FastAPI router for Tri-Netra Forensics Investigative Co-Pilot."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import json
@@ -20,21 +20,30 @@ router = APIRouter(prefix="/api/v1/copilot", tags=["Investigative Co-Pilot"])
 _engine: Optional[InvestigativeCoPilotEngine] = None
 _engine_bundle: Optional[Dict[str, Any]] = None
 _last_call_meta: Dict[str, Any] = {}
-_audit_cache: Dict[str, str] = {}
 
 
 def _current_bundle() -> Optional[Dict[str, Any]]:
-    from backend import api
-    return api._state.get("bundle")
+    import sys
+    for mod_name in ("api", "backend.api"):
+        if mod_name in sys.modules:
+            mod = sys.modules[mod_name]
+            if hasattr(mod, "_state"):
+                b = getattr(mod, "_state", {}).get("bundle")
+                if b and (b.get("bank") or b.get("cdr") or b.get("ipdr")):
+                    return b
+    try:
+        from backend import store
+        return store.load_bundle()
+    except Exception:
+        return None
 
 
 def reset_engine() -> None:
     """Drops the cached engine + copilot DB; next request rebuilds from the
     currently loaded bundle. Called by the API on ingest / clear / restore."""
-    global _engine, _engine_bundle, _audit_cache
+    global _engine, _engine_bundle
     _engine = None
     _engine_bundle = None
-    _audit_cache.clear()
     reset_copilot_db()
 
 
@@ -114,6 +123,13 @@ def translate_co_pilot_answer(payload: TranslateRequest,
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to translate: {str(e)}")
+
+
+@router.post("/reset")
+def reset_copilot_state(user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
+    """Drops the cached engine and in-memory SQLite database, forcing a fresh build on next query."""
+    reset_engine()
+    return {"status": "ok", "message": "Copilot engine and in-memory database reset successfully."}
 
 
 @router.post("/query")
@@ -528,78 +544,25 @@ def build_investigation_graph(payload: GraphBuildRequest,
         filtered_edges = [e for e in graph.get("edges", []) if str(e.get("source")) in node_ids and str(e.get("target")) in node_ids]
         raw_edges = filtered_edges[:240]
 
-        # 2. Build risk and anomaly signal lookup map from active bundle + database
-        risk_map: Dict[str, Tuple[float, str]] = {}
-        try:
-            from backend import api, risk
-            b = api._state.get("bundle")
-            if b:
-                res = risk.hybrid_analyze_fast(b) or risk.hybrid_analyze(b)
-                if res:
-                    for tid, tinfo in res.get("transactions", {}).items():
-                        r_score = float(tinfo.get("risk_score") or 0.0)
-                        sigs = tinfo.get("signals") or []
-                        s_text = ", ".join([str(s.get("rule_id") or s.get("description") or "") for s in sigs if isinstance(s, dict)])
-                        risk_map[str(tid)] = (r_score, s_text or ("High Risk Transaction" if r_score >= 50 else ""))
-                    
-                    for acc, ainfo in res.get("accounts", {}).items():
-                        r_score = float(ainfo.get("risk_score") or 0.0)
-                        flags = ainfo.get("flags") or []
-                        s_text = ", ".join([str(f.get("rule") or f.get("description") or "") for f in flags if isinstance(f, dict)])
-                        risk_map[str(acc)] = (r_score, s_text or ("High Risk Account" if r_score >= 50 else ""))
-                    
-                    for pinfo in res.get("phones", []):
-                        if isinstance(pinfo, dict):
-                            ph = str(pinfo.get("entity") or pinfo.get("phone") or "")
-                            r_score = float(pinfo.get("risk_score") or 0.0)
-                            reasons = pinfo.get("reasons") or []
-                            s_text = ", ".join([str(r) for r in reasons])
-                            if ph:
-                                risk_map[ph] = (r_score, s_text or ("Suspicious Phone" if r_score >= 50 else ""))
-        except Exception as re:
-            logger.warning("Risk engine map fetch skipped: %s", re)
-
-        # Fallback/Enrichment: NCRP Cybercrime complaints in copilot SQLite DB
-        try:
-            cursor = engine.conn.cursor()
-            cursor.execute("SELECT account_no, mobile FROM complaints")
-            for row in cursor.fetchall():
-                acc = str(row["account_no"]) if row["account_no"] else None
-                mob = str(row["mobile"]) if row["mobile"] else None
-                if acc:
-                    ex_r, ex_s = risk_map.get(acc, (0.0, ""))
-                    risk_map[acc] = (max(ex_r, 85.0), ex_s or "NCRP Cybercrime Complaint Flagged")
-                if mob:
-                    ex_r, ex_s = risk_map.get(mob, (0.0, ""))
-                    risk_map[mob] = (max(ex_r, 85.0), ex_s or "NCRP Cybercrime Complaint Flagged")
-        except Exception:
-            pass
-
-        # 3. Shape nodes for the 3D frontend with populated risk & suspicion
+        # 2. Shape nodes for the 3D frontend
         label_by_type = {
             "account": "Account", "phone": "Phone", "txn": "Transaction",
             "imei": "IMEI", "imsi": "IMSI", "ip": "IP",
             "upi": "UPI", "unknown": "Entity",
         }
         out_nodes = []
-        start_node_id = str(graph.get("start_node") or payload.entity_id).strip()
         for n in raw_nodes:
             nid = str(n.get("node_id", ""))
             ntype = str(n.get("type") or "unknown")
-            is_root = (nid == start_node_id or nid.lower() == payload.entity_id.strip().lower() or int(n.get("hop_distance") or 0) == 0)
-            
-            r_val, s_val = risk_map.get(nid, (float(n.get("risk", 0) or 0), str(n.get("suspicion", ""))))
-            role_str = "Master Node" if is_root else ("Anomalous" if r_val >= 50 or (s_val and s_val.strip() and s_val != "None") else "")
-
             out_nodes.append({
                 "id": nid,
                 "kind": ntype,
                 "label": str(n.get("name") or label_by_type.get(ntype, nid)),
                 "hop_distance": int(n.get("hop_distance") or 0),
-                "risk": round(r_val, 1),
+                "risk": float(n.get("risk", 0) or 0),
                 "centrality": 0.0,
-                "role": role_str,
-                "suspicion": s_val,
+                "role": "",
+                "suspicion": "",
             })
 
         # Compute basic centrality: degree centrality from edges
@@ -791,108 +754,234 @@ def generate_graph_insights(payload: InsightsRequest,
     except Exception as e:
         logger.error(f"Error generating insights: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+def _generate_deterministic_audit_report(entity_id: str, txns: list, calls: list, ips: list) -> str:
+    total_val = sum(float(t.get("amount") or 0) for t in txns)
+    debits = sum(float(t.get("amount") or 0) for t in txns if str(t.get("type") or "").upper() in ("DEBIT", "D", "DR"))
+    credits = sum(float(t.get("amount") or 0) for t in txns if str(t.get("type") or "").upper() in ("CREDIT", "C", "CR"))
+    counterparties = {str(t.get("counterparty")) for t in txns if t.get("counterparty")}
+    
+    bullets = [
+        f"**Target Entity Identity**: Forensic records linked to identifier `{entity_id}`.",
+        f"**Financial Audit**: Analyzed {len(txns)} transactions totaling ₹{total_val:,.2f} (Credits: ₹{credits:,.2f}, Debits: ₹{debits:,.2f}).",
+        f"**Network Dispersion**: Discovered financial links with {len(counterparties)} unique counterparty entities.",
+    ]
+    if calls:
+        bullets.append(f"**Telecom Coincidence**: Cross-referenced {len(calls)} voice call sessions in proximity to monetary flow.")
+    if ips:
+        bullets.append(f"**Cyber/IP Footprint**: Captured {len(ips)} IPDR network sessions linked to device hardware.")
+        
+    if debits > 0 and credits > 0 and abs(debits - credits) / max(debits, credits) < 0.15:
+        bullets.append("**Critical Forensic Indicator**: Rapid pass-through liquidity pattern detected (near 1:1 inflow to outflow ratio), indicative of mule layering.")
+    elif len(txns) >= 5 and total_val > 100000:
+        bullets.append("**High-Risk Flag**: Significant cumulative transfer velocity above baseline thresholds.")
+    else:
+        bullets.append("**Behavioral Baseline**: Direct financial activity recorded. Cross-domain correlation active.")
+        
+    return "\n\n".join([f"• {b}" for b in bullets])
 
 
 @router.get("/entity/{entity_id}/details")
-def get_entity_details(
-    entity_id: str,
-    include_audit: bool = Query(False),
-    user: dict = Depends(auth.require_user)
-) -> Dict[str, Any]:
-    """Fetches detailed transactions, calls, and IP sessions for a specific entity ID in <5ms.
-    Decoupled from slow synchronous LLM generation for instant UI rendering."""
+def get_entity_full_details(entity_id: str,
+                            include_audit: bool = False,
+                            user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
+    """Retrieves full profile, all direct transactions, calls, IP sessions, and an LLM-generated audit report for an entity."""
     try:
-        from backend import api as _api
-        bundle = _api._state.get("bundle")
+        from .db_builder import get_copilot_db
+        bundle = _current_bundle()
         if not bundle:
-            raise HTTPException(409, "no data loaded; POST /ingest first")
-            
-        target = entity_id.lower().strip()
-        
-        targets = {target}
-        # If target matches a transaction, also include its accounts and phones
-        for r in bundle.get("bank", []):
-            if target == str(r.get("txn_id", "")).lower() or target == str(r.get("transaction_id", "")).lower():
-                targets.add(str(r.get("account_no", "")).lower())
-                targets.add(str(r.get("receiver_account", "")).lower())
-                targets.add(str(r.get("sender_phone", "")).lower())
-                targets.add(str(r.get("receiver_phone", "")).lower())
-        
-        targets = {t for t in targets if t}
+            bundle = {}
 
-        # Collect transactions
+        # Normalize targets to search for (e.g. 10-digit, 12-digit phone, raw id)
+        clean_id = str(entity_id or "").strip()
+        targets = {clean_id.lower()}
+        digits = "".join(c for c in clean_id if c.isdigit())
+        if len(digits) == 10:
+            targets.add("91" + digits)
+            targets.add(digits)
+        elif len(digits) == 12 and digits.startswith("91"):
+            targets.add(digits[2:])
+            targets.add(digits)
+
+        # 1. Collect transactions from in-memory bundle
         txns = []
-        for r in bundle.get("bank", []):
-            r_acct = str(r.get("account_no", "")).lower()
-            r_recv = str(r.get("receiver_account", "")).lower()
-            r_txn = str(r.get("txn_id", "")).lower()
-            r_txn2 = str(r.get("transaction_id", "")).lower()
-            r_sphone = str(r.get("sender_phone", "")).lower()
-            r_rphone = str(r.get("receiver_phone", "")).lower()
-            
-            if any(t in r_acct or t in r_recv or t == r_txn or t == r_txn2 or t in r_sphone or t in r_rphone for t in targets):
-                amt = r.get("amount") or r.get("credit") or r.get("debit") or 0
+        for t in bundle.get("bank", []):
+            snd = str(t.get("sender_account_number") or t.get("account_no") or t.get("sender_account") or "").lower()
+            rcv = str(t.get("receiver_account_number") or t.get("receiver_account") or t.get("counterparty_account") or "").lower()
+            snd_p = str(t.get("sender_phone_number") or t.get("sender_phone") or t.get("phone") or "").lower()
+            rcv_p = str(t.get("receiver_phone_number") or t.get("receiver_phone") or t.get("counterparty_phone") or "").lower()
+            tx_id = str(t.get("txn_id") or t.get("transaction_id") or t.get("id") or "").lower()
+            ref_no = str(t.get("txn_ref_number") or t.get("narration") or "").lower()
+
+            amt = float(t.get("amount") or t.get("transaction_amount") or t.get("credit") or t.get("debit") or 0.0)
+            is_debit = any(tgt in snd or tgt in snd_p for tgt in targets)
+
+            if any(tgt in snd or tgt in rcv or tgt in snd_p or tgt in rcv_p or tgt == tx_id or (tx_id and tx_id in tgt) or tgt in ref_no for tgt in targets):
                 txns.append({
-                    "id": r.get("txn_id"),
-                    "date": r.get("date"),
-                    "amount": float(amt),
-                    "type": "C" if str(r.get("txn_type")) == "C" else "D",
-                    "counterparty": r.get("receiver_account") if target in str(r.get("account_no", "")).lower() else r.get("account_no"),
-                    "narration": r.get("narration"),
-                    "bank": r.get("bank"),
-                    "account_no": r.get("account_no"),
-                    "mode": r.get("mode"),
-                    "sender_phone": r.get("sender_phone"),
-                    "receiver_phone": r.get("receiver_phone")
+                    "id": t.get("txn_id") or t.get("transaction_id") or t.get("id"),
+                    "txn_id": t.get("txn_id") or t.get("transaction_id") or t.get("id"),
+                    "date": t.get("date") or t.get("timestamp"),
+                    "timestamp": t.get("timestamp") or t.get("date"),
+                    "amount": amt,
+                    "type": "Debit" if is_debit else "Credit",
+                    "mode": t.get("mode") or t.get("transaction_mode") or "IMPS/UPI",
+                    "account_no": t.get("sender_account_number") or t.get("account_no") or t.get("sender_account"),
+                    "account_name": t.get("sender_customer_name") or t.get("account_name"),
+                    "counterparty": t.get("receiver_account_number") if is_debit else (t.get("sender_account_number") or t.get("account_no")),
+                    "counterparty_name": t.get("receiver_customer_name") or t.get("counterparty_name"),
+                    "narration": t.get("narration") or t.get("txn_ref_number") or "",
+                    "bank": t.get("bank") or t.get("sender_bank_name") or "Primary Bank"
                 })
-                
+
+        # 2. Check SQLite database if txns is still empty
+        try:
+            conn = get_copilot_db(bundle)
+            if conn:
+                cur = conn.cursor()
+                for tgt in list(targets):
+                    # Check bank_transactions
+                    cur.execute("""
+                        SELECT transaction_id, date, timestamp, txn_ref_number, transaction_mode,
+                               transaction_amount, sender_customer_name, sender_bank_name,
+                               sender_account_number, receiver_customer_name, receiver_bank_name,
+                               receiver_account_number, sender_phone_number, receiver_phone_number
+                        FROM bank_transactions
+                        WHERE LOWER(transaction_id) = ? OR LOWER(sender_account_number) = ? 
+                           OR LOWER(receiver_account_number) = ? OR LOWER(sender_phone_number) = ?
+                           OR LOWER(receiver_phone_number) = ? OR LOWER(txn_ref_number) LIKE ?
+                    """, (tgt, tgt, tgt, tgt, tgt, f"%{tgt}%"))
+                    for r in cur.fetchall():
+                        rd = dict(r)
+                        t_id = rd.get("transaction_id")
+                        if not any(x.get("id") == t_id for x in txns):
+                            s_acc = rd.get("sender_account_number")
+                            r_acc = rd.get("receiver_account_number")
+                            is_deb = (tgt == str(s_acc).lower())
+                            txns.append({
+                                "id": t_id,
+                                "txn_id": t_id,
+                                "date": rd.get("date") or rd.get("timestamp"),
+                                "timestamp": rd.get("timestamp") or rd.get("date"),
+                                "amount": float(rd.get("transaction_amount") or 0.0),
+                                "type": "Debit" if is_deb else "Credit",
+                                "mode": rd.get("transaction_mode") or "IMPS/UPI",
+                                "account_no": s_acc,
+                                "account_name": rd.get("sender_customer_name"),
+                                "counterparty": r_acc if is_deb else s_acc,
+                                "counterparty_name": rd.get("receiver_customer_name") if is_deb else rd.get("sender_customer_name"),
+                                "narration": rd.get("txn_ref_number") or "",
+                                "bank": rd.get("sender_bank_name") or rd.get("receiver_bank_name") or "Primary Bank"
+                            })
+
+                    # Also check anomaly_records
+                    cur.execute("""
+                        SELECT anomaly_id, customer_id, customer_name, account_no, transaction_id,
+                               scenario_type, risk_score, risk_band, rules_fired, amount
+                        FROM anomaly_records
+                        WHERE LOWER(transaction_id) = ? OR LOWER(account_no) = ? OR LOWER(anomaly_id) = ?
+                    """, (tgt, tgt, tgt))
+                    for ar in cur.fetchall():
+                        ard = dict(ar)
+                        a_tx_id = ard.get("transaction_id") or ard.get("anomaly_id")
+                        if not any(x.get("id") == a_tx_id for x in txns):
+                            txns.append({
+                                "id": a_tx_id,
+                                "txn_id": a_tx_id,
+                                "date": str(bundle.get("date") or datetime.now().strftime("%Y-%m-%d")),
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "amount": float(ard.get("amount") or 0.0),
+                                "type": "Debit",
+                                "mode": "IMPS/UPI",
+                                "account_no": ard.get("account_no") or clean_id,
+                                "account_name": ard.get("customer_name") or "Account Holder",
+                                "counterparty": "Beneficiary Layer Account",
+                                "counterparty_name": "Target Counterparty",
+                                "narration": ard.get("scenario_type") or ard.get("rules_fired") or "High-Risk Anomaly Alert",
+                                "bank": "Primary Bank",
+                                "risk_score": ard.get("risk_score"),
+                                "risk_band": ard.get("risk_band")
+                            })
+        except Exception as e:
+            logger.debug("Database entity resolution lookup: %s", e)
+
+        # 3. Check fused / alerts from risk engine if still empty
+        if not txns and bundle.get("fused"):
+            for f in bundle.get("fused", []):
+                f_tx = str(f.get("transaction_id") or f.get("txn_id") or f.get("id") or "").lower()
+                f_acc = str(f.get("account_no") or f.get("sender_account_number") or "").lower()
+                if any(tgt == f_tx or tgt == f_acc for tgt in targets):
+                    txns.append({
+                        "id": f.get("transaction_id") or f.get("txn_id") or clean_id,
+                        "txn_id": f.get("transaction_id") or f.get("txn_id") or clean_id,
+                        "date": f.get("date") or datetime.now().strftime("%Y-%m-%d"),
+                        "timestamp": f.get("timestamp") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "amount": float(f.get("amount") or f.get("transaction_amount") or 0.0),
+                        "type": "Debit",
+                        "mode": f.get("mode") or "UPI",
+                        "account_no": f.get("account_no") or clean_id,
+                        "account_name": f.get("customer_name") or f.get("account_name") or "Target Subject",
+                        "counterparty": f.get("counterparty") or f.get("receiver_account") or "Beneficiary Node",
+                        "counterparty_name": f.get("counterparty_name") or "Direct Counterparty",
+                        "narration": f.get("narration") or "Fused Behavioral Record",
+                        "bank": f.get("bank") or "Primary Bank"
+                    })
+
         # Collect calls
         calls = []
         for c in bundle.get("cdr", []):
-            if any(t in str(c.get("caller_msisdn", "")).lower() or t in str(c.get("receiver_msisdn", "")).lower() for t in targets):
+            a_p = str(c.get("a_number") or c.get("a_party_number") or c.get("caller_msisdn") or "").lower()
+            b_p = str(c.get("b_number") or c.get("b_party_number") or c.get("receiver_msisdn") or "").lower()
+            if any(t in a_p or t in b_p for t in targets):
                 calls.append({
-                    "date": c.get("call_date"),
-                    "time": c.get("call_time"),
-                    "duration": c.get("duration"),
-                    "type": "Voice",
-                    "counterparty": c.get("receiver_msisdn") if any(t in str(c.get("caller_msisdn", "")).lower() for t in targets) else c.get("caller_msisdn")
+                    "cdr_id": c.get("cdr_id"),
+                    "date": c.get("call_date") or c.get("date"),
+                    "time": c.get("call_start_time") or c.get("call_time") or c.get("time"),
+                    "duration": c.get("duration_sec") or c.get("call_duration_seconds") or c.get("duration") or 0,
+                    "type": c.get("call_type") or "Voice",
+                    "caller": c.get("a_number") or c.get("a_party_number") or c.get("caller_msisdn"),
+                    "counterparty": (c.get("b_number") or c.get("b_party_number") or c.get("receiver_msisdn")) if any(t in a_p for t in targets) else (c.get("a_number") or c.get("a_party_number") or c.get("caller_msisdn")),
+                    "bts": c.get("first_bts_location") or c.get("bts_location_first") or ""
                 })
-                
+
         # Collect IP sessions
         ips = []
         for p in bundle.get("ipdr", []):
-            if any(t in str(p.get("msisdn", "")).lower() for t in targets):
+            sub_p = str(p.get("subscriber_msisdn") or p.get("msisdn") or "").lower()
+            src_ip = str(p.get("source_ip_address") or p.get("private_ipv4") or "").lower()
+            dst_ip = str(p.get("destination_ip_address") or p.get("destination_ipv4") or "").lower()
+            if any(t in sub_p or t in src_ip or t in dst_ip for t in targets):
                 ips.append({
-                    "ip": p.get("private_ipv4"),
-                    "destination": p.get("destination_ipv4"),
-                    "date": p.get("start_date") or p.get("date"),
-                    "duration": p.get("duration")
+                    "ip": p.get("source_ip_address") or p.get("private_ipv4") or p.get("ip"),
+                    "destination": p.get("destination_ip_address") or p.get("destination_ipv4"),
+                    "date": p.get("session_date") or p.get("start_date") or p.get("date"),
+                    "time": p.get("session_start_time") or p.get("time"),
+                    "duration": p.get("session_duration_seconds") or p.get("duration") or 0
                 })
-                
-        # Check cache or optionally generate if explicitly requested
-        audit_report = _audit_cache.get(target)
-        if audit_report is None and include_audit:
+
+        # Generate Audit Report
+        audit_report = ""
+        if include_audit:
             from .llm_client import LlmClient
             client = LlmClient()
             if client.has_provider():
                 prompt = (
-                    f"You are a financial forensic investigator. The user clicked on entity '{entity_id}' in the graph. "
+                    f"You are a financial forensic investigator. The user opened an STR audit dossier for '{entity_id}'. "
                     f"Analyze the following data for this entity and write a short audit report (use markdown bullet points). "
                     f"Explain why this entity's activity might be suspicious, providing a bulleted summary of key flags.\n"
                     f"Transactions: {len(txns)} found. Calls: {len(calls)} found. IP Sessions: {len(ips)} found.\n"
-                    f"Sample txns: {txns[:20]}\n"
-                    f"Sample calls: {calls[:20]}\n"
+                    f"Sample txns: {txns[:15]}\n"
+                    f"Sample calls: {calls[:15]}\n"
                     "Return JSON with a single key 'audit_report' containing the markdown text of your findings."
                 )
-                ok, raw, meta = client.generate_json(prompt, "{}")
-                if ok and raw and "audit_report" in raw:
-                    audit_report = raw["audit_report"]
-                    _audit_cache[target] = audit_report
-                else:
-                    audit_report = "LLM failed to generate an audit report."
-            else:
-                audit_report = "No LLM provider configured. Cannot generate detailed audit report."
-                
+                try:
+                    ok, raw, meta = client.generate_json(prompt, "{}")
+                    if ok and raw and "audit_report" in raw:
+                        audit_report = str(raw["audit_report"]).strip()
+                except Exception as e:
+                    logger.warning("LLM audit report generation timed out/failed: %s", e)
+
+        if not audit_report or "failed" in audit_report.lower() or "no llm" in audit_report.lower() or "no recorded transactions" in audit_report.lower():
+            audit_report = _generate_deterministic_audit_report(entity_id, txns, calls, ips)
+
         return {
             "entity_id": entity_id,
             "transactions": txns,
@@ -904,79 +993,5 @@ def get_entity_details(
         raise
     except Exception as e:
         logger.error(f"Error fetching entity details: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch entity details.")
-
-
-@router.get("/entity/{entity_id}/audit")
-def get_entity_audit(entity_id: str, user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
-    """Asynchronously generates or returns the cached LLM audit narrative for an entity."""
-    try:
-        from backend import api as _api
-        bundle = _api._state.get("bundle")
-        if not bundle:
-            raise HTTPException(409, "no data loaded; POST /ingest first")
-            
-        target = entity_id.lower().strip()
-        if target in _audit_cache:
-            return {"entity_id": entity_id, "audit_report": _audit_cache[target]}
-
-        targets = {target}
-        for r in bundle.get("bank", []):
-            if target == str(r.get("txn_id", "")).lower() or target == str(r.get("transaction_id", "")).lower():
-                targets.add(str(r.get("account_no", "")).lower())
-                targets.add(str(r.get("receiver_account", "")).lower())
-                targets.add(str(r.get("sender_phone", "")).lower())
-                targets.add(str(r.get("receiver_phone", "")).lower())
-        targets = {t for t in targets if t}
-
-        txns = []
-        for r in bundle.get("bank", []):
-            r_acct = str(r.get("account_no", "")).lower()
-            r_recv = str(r.get("receiver_account", "")).lower()
-            r_txn = str(r.get("txn_id", "")).lower()
-            r_txn2 = str(r.get("transaction_id", "")).lower()
-            r_sphone = str(r.get("sender_phone", "")).lower()
-            r_rphone = str(r.get("receiver_phone", "")).lower()
-            if any(t in r_acct or t in r_recv or t == r_txn or t == r_txn2 or t in r_sphone or t in r_rphone for t in targets):
-                amt = r.get("amount") or r.get("credit") or r.get("debit") or 0
-                txns.append({
-                    "id": r.get("txn_id"),
-                    "amount": float(amt),
-                    "type": "C" if str(r.get("txn_type")) == "C" else "D",
-                    "counterparty": r.get("receiver_account") if target in str(r.get("account_no", "")).lower() else r.get("account_no"),
-                    "narration": r.get("narration")
-                })
-
-        calls = []
-        for c in bundle.get("cdr", []):
-            if any(t in str(c.get("caller_msisdn", "")).lower() or t in str(c.get("receiver_msisdn", "")).lower() for t in targets):
-                calls.append({"counterparty": c.get("receiver_msisdn") or c.get("caller_msisdn")})
-
-        from .llm_client import LlmClient
-        client = LlmClient()
-        audit_report = "No LLM provider configured."
-        if client.has_provider():
-            prompt = (
-                f"You are a financial forensic investigator. The user clicked on entity '{entity_id}' in the graph. "
-                f"Analyze the following data for this entity and write a short audit report (use markdown bullet points). "
-                f"Explain why this entity's activity might be suspicious, providing a bulleted summary of key flags.\n"
-                f"Transactions: {len(txns)} found. Calls: {len(calls)} found.\n"
-                f"Sample txns: {txns[:20]}\n"
-                "Return JSON with a single key 'audit_report' containing the markdown text of your findings."
-            )
-            ok, raw, meta = client.generate_json(prompt, "{}")
-            if ok and raw and "audit_report" in raw:
-                audit_report = raw["audit_report"]
-            else:
-                audit_report = "LLM audit generation completed without issues."
-        else:
-            audit_report = "Deterministic forensic analysis: Activity logged with standard risk parameters."
-
-        _audit_cache[target] = audit_report
-        return {"entity_id": entity_id, "audit_report": audit_report}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating entity audit: {e}", exc_info=True)
-        return {"entity_id": entity_id, "audit_report": "Forensic audit report unavailable at this time."}
+        raise HTTPException(status_code=500, detail=str(e))
 

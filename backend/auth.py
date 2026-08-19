@@ -43,37 +43,32 @@ _csrf_lock = threading.Lock()
 
 
 def _secret() -> bytes:
-    """Return the signing secret (from APP_SECRET env var, persisted key_file, or stable instance seed)."""
+    """Return the signing secret (env first, else a persisted random key)."""
     env = os.environ.get("APP_SECRET")
-    if env and env != "replace-with-a-long-random-string-in-production":
+    if env:
         return env.encode()
     key_file = store._db_path().parent / "auth_secret.key"
     if key_file.exists():
         return key_file.read_bytes()
-    # Deterministic fallback key so tokens survive ephemeral container restarts
-    seed = f"trinetra_forensics_app_secret:{store._db_path().resolve()}"
-    key = hashlib.sha256(seed.encode()).digest()
-    try:
-        key_file.write_bytes(key)
-    except Exception as err:
-        config.log.error("[AUTH] Failed to write auth_secret.key: %s", err)
+    key = secrets.token_bytes(32)
+    key_file.write_bytes(key)
+    config.log.warning(
+        "APP_SECRET not set; generated ephemeral signing key at %s "
+        "(tokens invalidate if the file is removed)", key_file)
     return key
-
-
 
 
 def _db() -> sqlite3.Connection:
     conn = store._connect()
-    with conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username      TEXT PRIMARY KEY,
-                password_hash TEXT NOT NULL,
-                salt          TEXT NOT NULL,
-                role          TEXT NOT NULL DEFAULT 'officer',
-                created       TEXT NOT NULL
-            )
-        """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username      TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            salt          TEXT NOT NULL,
+            role          TEXT NOT NULL DEFAULT 'officer',
+            created       TEXT NOT NULL
+        )
+    """)
     return conn
 
 
@@ -102,21 +97,18 @@ def create_user(username: str, password: str, role: str = "officer") -> dict:
     try:
         with conn:
             row = conn.execute("SELECT COUNT(*) FROM users").fetchone()
-            if row and row[0] == 0:
+            if row[0] == 0:
                 role = "admin"
             conn.execute(
                 "INSERT INTO users(username, password_hash, salt, role, created)"
                 " VALUES(?,?,?,?,?)",
                 (username, digest, salt, role,
                  datetime.now(timezone.utc).isoformat(timespec="seconds")))
-            conn.commit()
     except sqlite3.IntegrityError:
         raise HTTPException(409, "username already exists")
     finally:
         conn.close()
-    config.log.info("[AUTH] user created: username=%s role=%s", username, role)
     return {"username": username, "role": role}
-
 
 
 def verify_user(username: str, password: str) -> dict | None:
@@ -226,15 +218,7 @@ class LoginBody(BaseModel):
 def register(body: RegisterBody) -> dict:
     if not config.allow_signup():
         raise HTTPException(403, "public sign-up is disabled on this server")
-    user = create_user(body.username, body.password)
-    token = issue_token(user["username"], user["role"])
-    config.log.info("[AUTH] registration complete: username=%s role=%s", user["username"], user["role"])
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": user,
-    }
-
+    return create_user(body.username, body.password)
 
 
 def login(body: LoginBody) -> dict:

@@ -15,4 +15,8 @@ pandas==2.3.3
 reportlab==5.0.0
 scikit-learn==1.7.2
 python-multipart==0.0.20
-neo4j==5.20.0  
+xgboost
+catboost
+lightgbm
+hdbscan
+gensim

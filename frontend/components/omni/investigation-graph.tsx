@@ -7,18 +7,15 @@
  * 3D force-directed linked-transactions tree. Nodes are color-coded by type
  * (account / phone / entity), sized by centrality, and glow by risk level.
  * Edges animate particle flow along money transfer directions.
- *
- * PHASE 3 OPTIMIZATION:
- * Decouples the 3D WebGL Canvas (ForceGraph3D) from the Hover Tooltip Overlay.
- * Mouse movements across nodes update only the lightweight overlay without
- * triggering Three.js / WebGL canvas reconciliation.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Search, Loader2, AlertTriangle, Network, Shield } from 'lucide-react';
+import { Search, Loader2, AlertTriangle, Network, Shield, ZoomIn } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
 import { api } from '@/lib/api';
+import SpriteText from 'three-spritetext';
 import { EntityDetailsOverlay } from './entity-details';
 
 // Force-graph must be loaded client-side only (Three.js + WebGL)
@@ -38,6 +35,44 @@ const EDGE_COLORS: Record<string, string> = {
   CALLED:         '#8b5cf6',
   LINKED:         '#64748b',
 };
+const RISK_GLOW: Record<string, string> = {
+  high:   'rgba(239,68,68,0.6)',
+  medium: 'rgba(245,158,11,0.5)',
+  low:    'rgba(16,185,129,0.3)',
+};
+
+// ─── node painting ───────────────────────────────────────────────────────
+function paintNode(node: any, ctx: CanvasRenderingContext2D) {
+  const r = 5 + (node.centrality || 0) * 8;
+  const color = NODE_COLORS[node.kind] || NODE_COLORS.unknown;
+
+  // Glow halo for high-risk / hub nodes
+  if (node.centrality > 0.5 || node.risk > 60) {
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, r + 4, 0, 2 * Math.PI);
+    ctx.fillStyle = node.risk > 60 ? RISK_GLOW.high : RISK_GLOW.medium;
+    ctx.fill();
+  }
+
+  // Node circle
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Label
+  const label = node.label?.length > 14
+    ? node.label.slice(0, 12) + '…'
+    : (node.label || node.id);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.font = 'bold 3px Inter, sans-serif';
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillText(label, node.x, node.y + r + 2);
+}
 
 // ─── types ────────────────────────────────────────────────────────────────
 interface GraphNode {
@@ -76,129 +111,7 @@ interface Insights {
   metrics?: Record<string, number>;
 }
 
-// ─── isolated memoized 3d canvas ─────────────────────────────────────────
-interface GraphCanvasProps {
-  graphData: { nodes: GraphNode[]; links: GraphEdge[] };
-  nodeLabel: (node: any) => string;
-  nodeColor: (node: any) => string;
-  nodeVal: (node: any) => number;
-  linkLabel: (link: any) => string;
-  linkColor: (link: any) => string;
-  linkWidth: (link: any) => number;
-  linkDirectionalParticles: (link: any) => number;
-  linkDirectionalParticleSpeed: (link: any) => number;
-  linkDirectionalParticleColor: (link: any) => string;
-  onNodeClick: (node: any) => void;
-  onNodeHover: (node: any) => void;
-  onNodeRightClick: (node: any) => void;
-  fgRef: React.RefObject<any>;
-}
-
-const GraphCanvas = React.memo(function GraphCanvas({
-  graphData,
-  nodeLabel,
-  nodeColor,
-  nodeVal,
-  linkLabel,
-  linkColor,
-  linkWidth,
-  linkDirectionalParticles,
-  linkDirectionalParticleSpeed,
-  linkDirectionalParticleColor,
-  onNodeClick,
-  onNodeHover,
-  onNodeRightClick,
-  fgRef,
-}: GraphCanvasProps) {
-  if (graphData.nodes.length === 0) return null;
-
-  return (
-    <ForceGraph3D
-      ref={fgRef}
-      graphData={graphData}
-      nodeId="id"
-      nodeLabel={nodeLabel}
-      nodeColor={nodeColor}
-      nodeVal={nodeVal}
-      nodeOpacity={0.92}
-      nodeResolution={16}
-      linkSource="source"
-      linkTarget="target"
-      linkLabel={linkLabel}
-      linkColor={linkColor}
-      linkWidth={linkWidth}
-      linkOpacity={0.6}
-      linkDirectionalParticles={linkDirectionalParticles}
-      linkDirectionalParticleSpeed={linkDirectionalParticleSpeed}
-      linkDirectionalParticleColor={linkDirectionalParticleColor}
-      linkDirectionalParticleWidth={2}
-      linkDirectionalArrowLength={4}
-      linkDirectionalArrowRelPos={1}
-      linkDirectionalArrowColor={linkColor}
-      linkCurvature={0.15}
-      onNodeClick={onNodeClick}
-      onNodeHover={onNodeHover}
-      onNodeRightClick={onNodeRightClick}
-      backgroundColor="rgba(0,0,0,0)"
-      showNavInfo={false}
-      enableNodeDrag={true}
-      enableNavigationControls={true}
-      warmupTicks={80}
-      cooldownTicks={120}
-      d3AlphaDecay={0.02}
-      d3VelocityDecay={0.3}
-    />
-  );
-});
-
-// ─── isolated memoized hover overlay ─────────────────────────────────────
-const GraphHoverOverlay = React.memo(function GraphHoverOverlay({
-  node,
-  color,
-}: {
-  node: GraphNode | null;
-  color: string;
-}) {
-  if (!node) return null;
-
-  return (
-    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-[350px] pointer-events-none transition-opacity duration-150">
-      <div className="bg-slate-900/95 backdrop-blur-md p-4 rounded-xl border border-slate-700 shadow-2xl">
-        <div className="flex items-center gap-3 mb-2">
-          <span className="w-3 h-3 rounded-full" style={{ background: color }}></span>
-          <strong className="text-sm text-slate-100 font-mono break-all">{node.label || node.id}</strong>
-        </div>
-        <div className="grid grid-cols-2 gap-2 mb-2">
-          <div className="bg-slate-800/50 p-2 rounded">
-            <p className="text-[10px] uppercase text-slate-500">Kind</p>
-            <p className="text-xs text-slate-300 capitalize">{node.kind}</p>
-          </div>
-          <div className="bg-slate-800/50 p-2 rounded">
-            <p className="text-[10px] uppercase text-slate-500">Risk / Suspicion</p>
-            <p className="text-xs text-slate-300 capitalize">{node.suspicion || (node.risk > 0 ? node.risk : 'None')}</p>
-          </div>
-        </div>
-        {node.role && (
-          <div className="bg-cyan-900/20 p-2 rounded mb-1">
-            <p className="text-[10px] uppercase text-cyan-500">Role</p>
-            <p className="text-xs text-cyan-300">{node.role}</p>
-          </div>
-        )}
-        <div className="bg-slate-800/50 p-2 rounded mt-1">
-          <p className="text-[10px] uppercase text-slate-500">
-            {node.kind === 'account' ? 'Account No' : node.kind === 'txn' ? 'Txn ID' : node.kind === 'phone' ? 'Phone No' : 'Entity ID'}
-          </p>
-          <p className="text-xs text-slate-300 font-mono break-all">{node.id}</p>
-        </div>
-        {node.centrality > 0.5 && (
-          <p className="text-[10px] text-purple-400 mt-2">🔗 High Centrality Hub</p>
-        )}
-      </div>
-    </div>
-  );
-});
-
-// ─── main component ───────────────────────────────────────────────────────
+// ─── component ────────────────────────────────────────────────────────────
 export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: string }) {
   const fgRef = useRef<any>(null);
   const [entityId, setEntityId] = useState(initialEntity);
@@ -210,8 +123,9 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
   const [error, setError] = useState('');
 
   const loadGraph = useCallback(async (eid?: string) => {
-    const target = (eid || entityId).trim();
+    const target = (eid || entityId || initialEntity).trim();
     if (!target) return;
+    setEntityId(target);
     setLoading(true);
     setError('');
     setInsights(null);
@@ -228,15 +142,15 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
       const nodes: GraphNode[] = data.nodes
         .filter((n: any) => n.id === target || (n.kind !== 'unknown' && n.label !== 'Unknown Entity' && !String(n.id).toLowerCase().includes('unknown')))
         .map((n: any) => ({
-          id: n.id,
-          kind: (n.kind || 'unknown').toLowerCase(),
-          label: n.label || n.id,
-          hop_distance: n.hop_distance || 0,
-          risk: n.risk || 0,
-          centrality: n.centrality || 0,
-          role: n.role || '',
-          suspicion: n.suspicion || '',
-        }));
+        id: n.id,
+        kind: (n.kind || 'unknown').toLowerCase(),
+        label: n.label || n.id,
+        hop_distance: n.hop_distance || 0,
+        risk: n.risk || 0,
+        centrality: n.centrality || 0,
+        role: n.role || '',
+        suspicion: n.suspicion || '',
+      }));
 
       const nodeIds = new Set(nodes.map(n => n.id));
       let links: GraphEdge[] = data.edges
@@ -290,6 +204,9 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
       setGraphData({ nodes, links });
       setEntityId(target); // Update state to the actual queried target so Amber coloring works
 
+      // Auto-focus camera removed as per user request to not auto-zoom to fit
+      // Users will manually zoom and rotate the LLM tree.
+
       // Generate insights
       try {
         const ins = await api.copilotInsightsGenerate({
@@ -310,41 +227,31 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
   }, [entityId]);
 
   useEffect(() => {
-    if (initialEntity) {
-      loadGraph(initialEntity);
-    } else {
-      api.alerts(0, 10).then((res) => {
-        const top = res.results?.[0]?.transaction_id || res.results?.[0]?.sender_customer_id || res.results?.[0]?.customer_phone;
-        if (top) {
-          setEntityId(top);
-          loadGraph(top);
-        }
-      }).catch(() => {});
-    }
-  }, [initialEntity, loadGraph]);
+    if (initialEntity) loadGraph(initialEntity);
+  }, [initialEntity]);
 
-  // ─── 3D node styling (memoized) ───────────────────────────────────
+  // ─── 3D node styling ──────────────────────────────────────────────
   const nodeColor = useCallback((node: any) => {
-    if (node.role === 'Master Node' || (node.id && entityId && String(node.id).trim().toLowerCase() === String(entityId).trim().toLowerCase())) {
-      return '#fbbf24'; // Centered Master Node: Amber/Yellow glow
+    if (node.id && entityId && String(node.id).trim().toLowerCase() === String(entityId).trim().toLowerCase()) {
+      return '#fbbf24'; // Master Node: Amber/Yellow
     }
     const hasSuspicion = node.suspicion && typeof node.suspicion === 'string' && node.suspicion.trim().length > 3 && node.suspicion.toLowerCase() !== 'none';
-    if (hasSuspicion || node.risk >= 40 || node.role === 'Anomalous') return '#ef4444'; // Anomalous: Red glow!
+    if (hasSuspicion || node.risk > 80) return '#ef4444'; // Anomalous: Red
     if (node.role && node.role.toLowerCase().includes('mule')) return '#ec4899'; // Pink for mules
     return NODE_COLORS[node.kind] || NODE_COLORS.unknown;
   }, [entityId]);
 
   const nodeVal = useCallback((node: any) => {
-    if (node.role === 'Master Node' || (node.id && entityId && String(node.id).trim().toLowerCase() === String(entityId).trim().toLowerCase())) {
-      return 25; // Root master node is static and large
+    if (node.id && entityId && String(node.id).trim().toLowerCase() === String(entityId).trim().toLowerCase()) {
+      return 20; // Root node is static and large
     }
-    if (node.kind === 'account') return 12 + (node.centrality || 0) * 8;
-    if (node.kind === 'txn') return 10;
-    if (node.kind === 'phone') return 8;
-    return 6; // Addon nodes (imei, ip)
+    return 2 + (node.centrality || 0) * 10 + (node.hop_distance === 0 ? 5 : 0);
   }, [entityId]);
 
-  const nodeLabel = useCallback((_node: any) => {
+  const nodeLabel = useCallback((node: any) => {
+    // User requested NO name in the bubble for 3D label, or rely on hover card
+    // We will return empty for the default 3D label to avoid congestion, 
+    // and rely on the UI overlay for hover.
     return '';
   }, []);
 
@@ -371,6 +278,7 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
 
   const handleNodeClick = useCallback((node: any) => {
     setSelectedNode(node);
+    // Focus camera on clicked node
     if (fgRef.current) {
       const distance = 120;
       const distRatio = 1 + distance / Math.hypot(node.x || 0, node.y || 0, node.z || 0);
@@ -380,10 +288,6 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
         1500
       );
     }
-  }, []);
-
-  const handleNodeHover = useCallback((node: any) => {
-    setHoveredNode(node as GraphNode | null);
   }, []);
 
   const handleNodeDoubleClick = useCallback((node: any) => {
@@ -402,10 +306,6 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
   const linkDirectionalParticleColor = useCallback((link: any) => {
     return link.kind === 'TRANSFERRED_TO' ? '#10b981' : '#a78bfa';
   }, []);
-
-  const hoveredColor = useMemo(() => {
-    return hoveredNode ? nodeColor(hoveredNode) : '#ffffff';
-  }, [hoveredNode, nodeColor]);
 
   return (
     <div className="w-full h-full min-h-[600px] flex flex-col relative overflow-hidden bg-background">
@@ -486,27 +386,80 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
         </div>
       )}
 
-      {/* ── 3D force graph (isolated canvas, zero hover re-renders) ── */}
-      <GraphCanvas
-        fgRef={fgRef}
-        graphData={graphData}
-        nodeLabel={nodeLabel}
-        nodeColor={nodeColor}
-        nodeVal={nodeVal}
-        linkLabel={linkLabel}
-        linkColor={linkColor}
-        linkWidth={linkWidth}
-        linkDirectionalParticles={linkDirectionalParticles}
-        linkDirectionalParticleSpeed={linkDirectionalParticleSpeed}
-        linkDirectionalParticleColor={linkDirectionalParticleColor}
-        onNodeClick={handleNodeClick}
-        onNodeHover={handleNodeHover}
-        onNodeRightClick={handleNodeDoubleClick}
-      />
+      {/* ── 3D force graph ────────────────────────────────────────────── */}
+      {graphData.nodes.length > 0 && (
+        <ForceGraph3D
+          ref={fgRef}
+          graphData={graphData}
+          nodeId="id"
+          nodeLabel={nodeLabel}
+          nodeColor={nodeColor}
+          nodeVal={nodeVal}
+          nodeOpacity={0.92}
+          nodeResolution={16}
+          linkSource="source"
+          linkTarget="target"
+          linkLabel={linkLabel}
+          linkColor={linkColor}
+          linkWidth={linkWidth}
+          linkOpacity={0.6}
+          linkDirectionalParticles={linkDirectionalParticles}
+          linkDirectionalParticleSpeed={linkDirectionalParticleSpeed}
+          linkDirectionalParticleColor={linkDirectionalParticleColor}
+          linkDirectionalParticleWidth={2}
+          linkDirectionalArrowLength={4}
+          linkDirectionalArrowRelPos={1}
+          linkDirectionalArrowColor={linkColor}
+          linkCurvature={0.15}
+          onNodeClick={handleNodeClick}
+          onNodeHover={(node) => setHoveredNode(node as GraphNode | null)}
+          onNodeRightClick={handleNodeDoubleClick}
+          backgroundColor="rgba(0,0,0,0)"
+          showNavInfo={false}
+          enableNodeDrag={true}
+          enableNavigationControls={true}
+          warmupTicks={80}
+          cooldownTicks={120}
+          d3AlphaDecay={0.02}
+          d3VelocityDecay={0.3}
+        />
+      )}
 
-      {/* ── hover kpi card (decoupled overlay) ────────────────────────── */}
-      {!selectedNode && (
-        <GraphHoverOverlay node={hoveredNode} color={hoveredColor} />
+      {/* ── hover kpi card ────────────────────────────────────────────── */}
+      {hoveredNode && !selectedNode && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-[350px] pointer-events-none">
+          <div className="bg-slate-900/95 backdrop-blur-md p-4 rounded-xl border border-slate-700 shadow-2xl">
+            <div className="flex items-center gap-3 mb-2">
+              <span className="w-3 h-3 rounded-full" style={{ background: nodeColor(hoveredNode) }}></span>
+              <strong className="text-sm text-slate-100 font-mono break-all">{hoveredNode.label || hoveredNode.id}</strong>
+            </div>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <div className="bg-slate-800/50 p-2 rounded">
+                <p className="text-[10px] uppercase text-slate-500">Kind</p>
+                <p className="text-xs text-slate-300 capitalize">{hoveredNode.kind}</p>
+              </div>
+              <div className="bg-slate-800/50 p-2 rounded">
+                <p className="text-[10px] uppercase text-slate-500">Risk / Suspicion</p>
+                <p className="text-xs text-slate-300 capitalize">{hoveredNode.suspicion || (hoveredNode.risk > 0 ? hoveredNode.risk : 'None')}</p>
+              </div>
+            </div>
+            {hoveredNode.role && (
+              <div className="bg-cyan-900/20 p-2 rounded mb-1">
+                <p className="text-[10px] uppercase text-cyan-500">Role</p>
+                <p className="text-xs text-cyan-300">{hoveredNode.role}</p>
+              </div>
+            )}
+            <div className="bg-slate-800/50 p-2 rounded mt-1">
+              <p className="text-[10px] uppercase text-slate-500">
+                {hoveredNode.kind === 'account' ? 'Account No' : hoveredNode.kind === 'txn' ? 'Txn ID' : hoveredNode.kind === 'phone' ? 'Phone No' : 'Entity ID'}
+              </p>
+              <p className="text-xs text-slate-300 font-mono break-all">{hoveredNode.id}</p>
+            </div>
+            {hoveredNode.centrality > 0.5 && (
+              <p className="text-[10px] text-purple-400 mt-2">🔗 High Centrality Hub</p>
+            )}
+          </div>
+        </div>
       )}
 
       {/* ── selected node detail ──────────────────────────────────────── */}
@@ -517,7 +470,6 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
           onInvestigate={(id) => {
             setSelectedNode(null);
             setEntityId(id);
-            loadGraph(id);
           }}
         />
       )}

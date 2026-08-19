@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  allowedDevOrigins: ["10.108.233.29", "192.168.137.1", "localhost"],
+
   async headers() {
     return [
       {
@@ -10,20 +10,34 @@ const nextConfig: NextConfig = {
         headers: [
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "X-Frame-Options", value: "DENY" },
-          { key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains; preload" },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=31536000; includeSubDomains; preload",
+          },
           { key: "X-DNS-Prefetch-Control", value: "on" },
         ],
       },
     ];
   },
+
   async rewrites() {
     return [
       {
         source: "/api/:path*",
-        destination: `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/api/:path*`,
-
+        destination: `${process.env.APP_BACKEND_URL ?? "http://127.0.0.1:8000"}/:path*`,
       },
     ];
+  },
+
+  experimental: {
+    proxyClientMaxBodySize: "500mb",
+    serverActions: {
+      bodySizeLimit: "500mb",
+    },
+  },
+
+  httpAgentOptions: {
+    keepAlive: false,
   },
 };
 

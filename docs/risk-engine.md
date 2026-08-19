@@ -13,24 +13,15 @@ The rule engine executes rigid, logic-based checks against the fused dataset. It
 * **Odd-Hour Activity**: High-volume transactions occurring between 1:00 AM and 4:00 AM local time.
 * **Circular Flow**: Funds originate at Account A, pass through intermediary accounts, and return to Account A (detected via Graph Intelligence).
 
-## 2. 11-Model Machine Learning Anomaly Detection (`ensemble.py`)
+## 2. Machine Learning Anomaly Detection (`ensemble.py`)
 
-Deterministic rules can be evaded by careful criminals. The ML engine establishes behavioral baselines and flags statistical deviations using an **11-model hybrid ensemble**:
+Deterministic rules can be evaded by careful criminals. The ML engine establishes behavioral baselines and flags statistical deviations.
 
-### Unsupervised Cold-Start Detectors (7 Models)
-- **Isolation Forest**: Identifies global structural outliers in transaction velocity and volume.
-- **Local Outlier Factor (LOF)**: Measures local density deviations vs. network peers.
-- **DBSCAN & HDBSCAN**: Identifies dense cluster baselines and flags isolated noise points.
-- **One-Class SVM**: RBF-kernel margin outlier detection in high-dimensional feature space.
-- **PCA Reconstruction Error**: Identifies accounts unrepresentable in the principal subspace.
-- **Z-Score Baseline**: Extreme-feature statistical thresholding.
+### Ensemble Approach
+* **Isolation Forest**: Used to isolate extreme outliers in transaction velocity (count per hour) and volume (amount distribution). It assigns an anomaly score from 0 to 1 to every entity.
+* **Local Outlier Factor (LOF)**: Measures local density deviations, identifying accounts that behave drastically differently from their immediate network peers.
 
-### Supervised Detectors (4 Models - Ground Truth Mode)
-- **Random Forest**, **XGBoost**, **LightGBM**, **CatBoost** classifiers trained dynamically on ground-truth feedback.
-
-## 3. High-Performance Behavioral Optimization & Background Prefetching
-- **Indexed Temporal Checks**: $O(1)$ constant-time bisected range checks and `calls_by_phone_day` pre-indexing eliminate legacy $O(N_{\text{calls}} \times N_{\text{txns}})$ loops.
-- **Proactive Background Prefetching**: When the pipeline hits `ANOMALIES_READY`, alerts are pre-warmed in the background. Clicking the Anomaly tab loads instantly with **0ms delay**.
-
-## 4. Risk Scoring & Aggregation
-The Risk Engine aggregates signals from rules, ML models, temporal patterns, and telecom/IPDR metadata to produce a final `risk_score` (0.0 to 100.0) for every transaction, account, and phone entity. Thresholds automatically surface high-risk alerts to the investigator's Anomaly Feed.
+## 3. Risk Scoring & Aggregation
+The Risk Engine aggregates signals from both the rules and the ML models to produce a final `risk_score` (0.0 to 1.0) for every entity.
+- Base score + (Rule weight * triggers) + (ML anomaly score * weight).
+Entities exceeding a defined threshold (e.g., 0.75) are surfaced to the top of the investigator's Anomaly Feed.

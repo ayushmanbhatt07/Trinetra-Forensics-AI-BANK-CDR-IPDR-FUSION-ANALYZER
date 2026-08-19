@@ -84,6 +84,26 @@ export const FusedSection = React.memo(function FusedSection() {
     return () => window.removeEventListener("pipeline:fused_ready", handleFusedReady);
   }, []);
 
+  const downloadSTR = async () => {
+    try {
+      toast.info("Generating FIU-IND Master STR PDF...");
+      await api.downloadReport();
+      toast.success("Master STR PDF downloaded successfully.");
+    } catch (e) {
+      toast.error((e as { message?: string })?.message ?? "Failed to generate STR PDF.");
+    }
+  };
+
+  const downloadTransactionSTR = async (txnId: string) => {
+    try {
+      toast.info(`Generating FIU-IND Transaction STR PDF for ${txnId}...`);
+      await api.transactionReport(txnId);
+      toast.success(`Transaction STR ${txnId} downloaded successfully.`);
+    } catch (e) {
+      toast.error((e as { message?: string })?.message ?? `Failed to generate STR for ${txnId}.`);
+    }
+  };
+
   const loadFused = useCallback(() => {
     if (!isFusedReady && !pipeline?.dataset_id) {
       setFusedLoading(false);
@@ -232,6 +252,9 @@ export const FusedSection = React.memo(function FusedSection() {
             </div>
             <Button variant="outline" size="sm" onClick={downloadFusedCsv}>
               <Download className="mr-1 size-4" /> CSV
+            </Button>
+            <Button variant="outline" size="sm" onClick={downloadSTR} className="border-emerald-500/40 text-emerald-400 hover:bg-emerald-950/20">
+              <FileText className="mr-1 size-4" /> Download STR
             </Button>
             <Button
               size="sm"
@@ -513,18 +536,32 @@ export const FusedSection = React.memo(function FusedSection() {
 
               {/* STR */}
               <div className="border-t border-border p-5">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-emerald-500">
-                  Suspicious Transaction Report
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-emerald-500 font-mono">
+                  Official Suspicious Transaction Report (STR)
                 </p>
                 <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={() => downloadTransactionSTR(selectedRow.transaction_id)}
+                    className="bg-red-600 text-white hover:bg-red-500 font-mono text-xs shadow-lg shadow-red-950/40"
+                  >
+                    <Download className="mr-1.5 size-4" /> Download Transaction STR (PDF)
+                  </Button>
                   <Button
                     variant="outline"
                     onClick={() => {
                       window.dispatchEvent(new CustomEvent("pdf:transaction", { detail: selectedRow.transaction_id }));
-                      toast.success("Transaction STR visual generation started.");
+                      toast.success("Opening interactive STR visual dossier...");
                     }}
+                    className="border-cyan-500/40 text-cyan-400 hover:bg-cyan-950/20 font-mono text-xs"
                   >
-                    <FileText className="mr-1 size-4" /> Transaction STR
+                    <FileText className="mr-1.5 size-4" /> Interactive STR Dossier
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={downloadSTR}
+                    className="border-emerald-500/40 text-emerald-400 hover:bg-emerald-950/20 font-mono text-xs"
+                  >
+                    <FileText className="mr-1.5 size-4" /> Master Case STR (PDF)
                   </Button>
                 </div>
               </div>

@@ -2,7 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import { FlipKpiCard } from "@/components/ui/flip-card";
-import { Database, ShieldAlert, Users, Target, FileText, PhoneCall, Banknote, Activity, Network } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Database, ShieldAlert, Users, Target, FileText, PhoneCall, Banknote, Activity, Network, Download, Loader2 } from "lucide-react";
 import { api, isNoDataLoaded, isPipelineNotReady, isNetworkOrWarmupError, type Summary, type CopilotStats } from "@/lib/api";
 import { toast } from "sonner";
 import { usePipeline } from "@/lib/pipeline-context";
@@ -12,6 +13,7 @@ export const OverviewSection = React.memo(function OverviewSection() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [copilot, setCopilot] = useState<CopilotStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [strDownloading, setStrDownloading] = useState(false);
 
   const load = () => {
     api
@@ -23,6 +25,29 @@ export const OverviewSection = React.memo(function OverviewSection() {
         }
       })
       .finally(() => setLoading(false));
+  };
+
+  const handleDownloadMasterSTR = async () => {
+    setStrDownloading(true);
+    toast.info("Generating FIU-IND Master STR Dossier...");
+    try {
+      await api.downloadReport();
+      toast.success("Master STR Dossier downloaded successfully.");
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to generate STR report.");
+    } finally {
+      setStrDownloading(false);
+    }
+  };
+
+  const handleDownloadEntitySTR = async (kind: string, value: string) => {
+    toast.info(`Generating ${kind.toUpperCase()} STR for ${value}...`);
+    try {
+      await api.downloadEntityReport(kind, value);
+      toast.success(`Entity STR for ${value} downloaded.`);
+    } catch (e: any) {
+      toast.error(e?.message || `Failed to generate STR for ${value}.`);
+    }
   };
 
   useEffect(() => {
@@ -38,7 +63,6 @@ export const OverviewSection = React.memo(function OverviewSection() {
       window.removeEventListener("pipeline:anomalies_ready", handleRefresh);
     };
   }, []);
-
 
   useEffect(() => {
     if (!summary) return;
@@ -64,6 +88,45 @@ export const OverviewSection = React.memo(function OverviewSection() {
 
   return (
     <div className="space-y-6">
+      {/* Top Banner Toolbar */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-card/60 backdrop-blur-md border border-border/80 p-4 rounded-xl">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-lg bg-red-950/40 border border-red-800/40 text-red-400">
+            <ShieldAlert className="size-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-foreground tracking-wide font-mono">
+              TRI-NETRA FORENSIC INTELLIGENCE SUITE
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              Cross-Dataset Correlation • Unified Entity Graph • Automated FIU-IND STR Generation
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <Button
+            size="sm"
+            onClick={handleDownloadMasterSTR}
+            disabled={strDownloading || total === 0}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white font-mono text-xs shadow-lg shadow-emerald-950/40"
+          >
+            {strDownloading ? (
+              <Loader2 className="mr-1.5 size-4 animate-spin" />
+            ) : (
+              <FileText className="mr-1.5 size-4" />
+            )}
+            Download Master STR (PDF)
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => window.dispatchEvent(new CustomEvent("nav:section", { detail: "reports" }))}
+            className="font-mono text-xs border-cyan-500/40 text-cyan-400 hover:bg-cyan-950/20"
+          >
+            Reports Center &rarr;
+          </Button>
+        </div>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <FlipKpiCard
           data={{
@@ -156,12 +219,19 @@ export const OverviewSection = React.memo(function OverviewSection() {
                 <p className="text-sm text-muted-foreground">No scored accounts yet.</p>
               )}
               {summary.top_risk_accounts.slice(0, 6).map((a) => (
-                <div key={a.account_no} className="flex items-center justify-between text-sm">
+                <div key={a.account_no} className="flex items-center justify-between text-sm py-1 border-b border-border/40 last:border-0">
                   <span className="font-mono text-xs text-foreground">{a.account_no}</span>
-                  <span className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">{a.flags.slice(0, 2).join(", ") || "—"}</span>
-                    <span className="font-bold text-red-500">{a.score}</span>
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground hidden sm:inline">{a.flags.slice(0, 2).join(", ") || "—"}</span>
+                    <span className="font-bold text-red-500 font-mono text-xs">{a.score}</span>
+                    <button
+                      title={`Download STR PDF for account ${a.account_no}`}
+                      onClick={() => handleDownloadEntitySTR("account", a.account_no)}
+                      className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-emerald-400 transition-colors"
+                    >
+                      <Download className="size-3.5" />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -176,12 +246,19 @@ export const OverviewSection = React.memo(function OverviewSection() {
                 <p className="text-sm text-muted-foreground">No scored phones yet.</p>
               )}
               {summary.top_risk_phones.slice(0, 6).map((p) => (
-                <div key={p.phone} className="flex items-center justify-between text-sm">
+                <div key={p.phone} className="flex items-center justify-between text-sm py-1 border-b border-border/40 last:border-0">
                   <span className="font-mono text-xs text-foreground">{p.phone}</span>
-                  <span className="flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">{p.flags.slice(0, 2).join(", ") || "—"}</span>
-                    <span className="font-bold text-red-500">{p.score}</span>
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground hidden sm:inline">{p.flags.slice(0, 2).join(", ") || "—"}</span>
+                    <span className="font-bold text-red-500 font-mono text-xs">{p.score}</span>
+                    <button
+                      title={`Download STR PDF for phone ${p.phone}`}
+                      onClick={() => handleDownloadEntitySTR("phone", p.phone)}
+                      className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-emerald-400 transition-colors"
+                    >
+                      <Download className="size-3.5" />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

@@ -1,16 +1,16 @@
 """Lightweight RAG retrieval for the Investigative Co-Pilot.
 
 Extracts entity hints (phone / TXN / account / IMEI / IP / amount / mode /
-location) from the investigator's natural-language query, pulls the top
+location / name) from the investigator's natural-language query, pulls the top
 matching rows from the fused copilot DB (bank, CDR, IPDR, subscribers,
-complaints) and formats them as a compact evidence context block that is
+complaints, anomaly_records) and formats them as a compact evidence context block that is
 injected into the LLM prompt. This grounds every answer in the *uploaded
 dataset* instead of general knowledge.
 """
 import re
 from typing import Any, Dict, List, Optional
 
-PHONE_RE = re.compile(r"\b\d{10}\b")
+PHONE_RE = re.compile(r"\b(?:\+?91)?[6-9]\d{9}\b|\b\d{10}\b|\b91\d{10}\b")
 IMEI_RE = re.compile(r"\b\d{15}\b")
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # Match real dataset transaction IDs: prefixes TXN/ATM/UPI/IMPS/NEFT/RTGS/CHEQUE
@@ -26,6 +26,17 @@ ACCOUNT_RE = re.compile(r"\b\d{6,18}\b")
 
 MODES = ("UPI", "IMPS", "NEFT", "RTGS", "ATM", "CHEQUE", "NETBANKING", "PAYTM", "WALLET")
 
+_NAME_STOP = {
+    "the", "and", "for", "from", "with", "that", "this", "have", "show", "find",
+    "give", "what", "when", "where", "which", "about", "account", "transaction",
+    "details", "record", "records", "anomalies", "anomaly", "anomalous", "suspicious",
+    "flagged", "mule", "layering", "fraud", "transfers", "transfer", "bank", "cdr",
+    "ipdr", "call", "calls", "session", "sessions", "phone", "number", "named",
+    "all", "list", "trace", "summary", "overview", "top", "highest", "largest",
+    "greater", "less", "between", "under", "above", "exceeding", "inr", "rs", "rupees",
+    "why", "how", "is", "are", "were", "was", "any", "get", "who", "whom"
+}
+
 
 def extract_entities(query: str) -> Dict[str, List[str]]:
     """Pulls structured hints out of the free-text query."""
@@ -33,20 +44,34 @@ def extract_entities(query: str) -> Dict[str, List[str]]:
         "phone": [], "txn": [], "cdr": [], "ipdr": [],
         "imei": [], "ip": [], "account": [],
         "amount": [], "mode": [], "location": [],
+        "name": [],
     }
     q = query or ""
-    out["phone"] = list(dict.fromkeys(PHONE_RE.findall(q)))
+    raw_phones = list(dict.fromkeys(PHONE_RE.findall(q)))
+    norm_phones = []
+    for p in raw_phones:
+        norm_phones.append(p)
+        if len(p) == 12 and p.startswith("91"):
+            norm_phones.append(p[2:])
+        elif len(p) == 13 and p.startswith("+91"):
+            norm_phones.append(p[3:])
+            norm_phones.append(p[1:])
+        elif len(p) == 10:
+            norm_phones.append("91" + p)
+            norm_phones.append("+91" + p)
+    out["phone"] = list(dict.fromkeys(norm_phones))
+
     out["txn"] = [t.upper() for t in dict.fromkeys(TXN_RE.findall(q))]
     out["cdr"] = [t.upper() for t in dict.fromkeys(CDR_RE.findall(q))]
     out["ipdr"] = [t.upper() for t in dict.fromkeys(IPDR_RE.findall(q))]
     out["imei"] = list(dict.fromkeys(IMEI_RE.findall(q)))
     out["ip"] = list(dict.fromkeys(IP_RE.findall(q)))
     out["account"] = [a for a in dict.fromkeys(ACCOUNT_RE.findall(q)) if a not in out["phone"] and a not in out["imei"]]
+
     for m in MODES:
         if m in q.upper():
-            # Avoid matching "UPI" / "ATM" / "IMPS" / "NEFT" when they are part
-            # of a transaction ID that was already captured.
             out["mode"].append(m)
+
     for amt in AMOUNT_RE.findall(q):
         digits = amt[0].replace(",", "")
         if not digits:
@@ -61,7 +86,18 @@ def extract_entities(query: str) -> Dict[str, List[str]]:
             value *= 1e3
         if 100 <= value <= 1e10:
             out["amount"].append(value)
+
     out["location"] = [loc for loc in ("west bengal", "kolkata", "delhi", "mumbai", "gujarat", "rajasthan", "bihar", "tamil nadu", "karnataka", "assam") if loc in q.lower()]
+
+    # Extract name candidates
+    words = [w.strip(".,!?:;\"'()[]{}") for w in q.split() if w.strip(".,!?:;\"'()[]{}")]
+    name_candidates = []
+    for w in words:
+        wl = w.lower()
+        if wl not in _NAME_STOP and len(w) >= 3 and not w.isdigit() and not any(w.upper().startswith(p) for p in ("TXN", "ATM", "UPI", "IMPS", "CDR", "IPDR")):
+            name_candidates.append(w)
+    out["name"] = name_candidates
+
     return out
 
 
@@ -96,6 +132,16 @@ def _ipdr_snippet(r: Dict[str, Any]) -> str:
             f"port={r.get('destination_port')} {r.get('session_duration_seconds') or 0}s")
 
 
+def _anomaly_snippet(r: Dict[str, Any]) -> str:
+    amt = r.get("amount")
+    amt_s = f" ₹{amt:,.0f}" if isinstance(amt, (int, float)) else ""
+    return (f"ANOMALY {r.get('anomaly_id')}{amt_s} txn={r.get('transaction_id')} "
+            f"cust={r.get('customer_name') or ''} ({r.get('customer_id') or ''}) "
+            f"acc={r.get('account_no') or ''} risk={r.get('risk_score') or 0} "
+            f"band={r.get('risk_band') or ''} scenario={r.get('scenario_type') or ''} "
+            f"rules={r.get('rules_fired') or ''}")
+
+
 def retrieve_context(conn, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
     """Returns up to ``top_k`` evidence rows relevant to the query, each as
     ``{"table": ..., "id": ..., "snippet": ...}``."""
@@ -108,17 +154,30 @@ def retrieve_context(conn, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
             return
         out.append({"table": table, "id": str(idv), "snippet": snippet.strip()})
 
-    # 1. Exact entity lookups (phone / txn / account / imei / ip)
+    # 1. Exact entity lookups (phone / txn / account / imei / ip / name)
     for ph in hints["phone"]:
-        for r in _rows(cursor, "SELECT * FROM bank_transactions WHERE sender_phone_number = ? OR receiver_phone_number = ? LIMIT 3", (ph, ph)):
+        pat = f"%{ph[-10:]}%" if len(ph) >= 10 else f"%{ph}%"
+        for r in _rows(cursor, "SELECT * FROM bank_transactions WHERE sender_phone_number LIKE ? OR receiver_phone_number LIKE ? LIMIT 3", (pat, pat)):
             push("bank_transactions", r["transaction_id"], _txn_snippet(r))
-        for r in _rows(cursor, "SELECT * FROM cdr_records WHERE a_party_number = ? OR b_party_number = ? LIMIT 3", (ph, ph)):
+        for r in _rows(cursor, "SELECT * FROM cdr_records WHERE a_party_number LIKE ? OR b_party_number LIKE ? LIMIT 3", (pat, pat)):
             push("cdr_records", r["cdr_id"], _cdr_snippet(r))
-        for r in _rows(cursor, "SELECT * FROM ipdr_records WHERE subscriber_msisdn = ? LIMIT 3", (ph,)):
+        for r in _rows(cursor, "SELECT * FROM ipdr_records WHERE subscriber_msisdn LIKE ? LIMIT 3", (pat,)):
             push("ipdr_records", r["ipdr_id"], _ipdr_snippet(r))
-        for r in _rows(cursor, "SELECT * FROM subscribers WHERE phone = ? LIMIT 2", (ph,)):
+        for r in _rows(cursor, "SELECT * FROM subscribers WHERE phone LIKE ? LIMIT 2", (pat,)):
             push("subscribers", r.get("phone"), f"subscriber {r.get('name')} circle={r.get('circle')} imsi={r.get('imsi')} imei={r.get('imei')}")
+
+    for name in hints["name"]:
+        pat = f"%{name}%"
+        for r in _rows(cursor, "SELECT * FROM anomaly_records WHERE customer_name LIKE ? ORDER BY risk_score DESC LIMIT 3", (pat,)):
+            push("anomaly_records", r["anomaly_id"], _anomaly_snippet(r))
+        for r in _rows(cursor, "SELECT * FROM bank_transactions WHERE sender_customer_name LIKE ? OR receiver_customer_name LIKE ? LIMIT 3", (pat, pat)):
+            push("bank_transactions", r["transaction_id"], _txn_snippet(r))
+        for r in _rows(cursor, "SELECT * FROM subscribers WHERE name LIKE ? LIMIT 2", (pat,)):
+            push("subscribers", r.get("phone"), f"subscriber {r.get('name')} circle={r.get('circle')} phone={r.get('phone')}")
+
     for txn in hints["txn"]:
+        for r in _rows(cursor, "SELECT * FROM anomaly_records WHERE transaction_id = ? LIMIT 2", (txn,)):
+            push("anomaly_records", r["anomaly_id"], _anomaly_snippet(r))
         for r in _rows(cursor, "SELECT * FROM bank_transactions WHERE transaction_id = ? LIMIT 3", (txn,)):
             push("bank_transactions", r["transaction_id"], _txn_snippet(r))
     for cdr_id in hints["cdr"]:
@@ -128,6 +187,8 @@ def retrieve_context(conn, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
         for r in _rows(cursor, "SELECT * FROM ipdr_records WHERE ipdr_id = ? LIMIT 3", (ipdr_id,)):
             push("ipdr_records", r["ipdr_id"], _ipdr_snippet(r))
     for acc in hints["account"]:
+        for r in _rows(cursor, "SELECT * FROM anomaly_records WHERE account_no LIKE ? LIMIT 2", (f"%{acc}%",)):
+            push("anomaly_records", r["anomaly_id"], _anomaly_snippet(r))
         for r in _rows(cursor, "SELECT * FROM bank_transactions WHERE sender_account_number = ? OR receiver_account_number = ? LIMIT 3", (acc, acc)):
             push("bank_transactions", r["transaction_id"], _txn_snippet(r))
         for r in _rows(cursor, "SELECT * FROM complaints WHERE account_no = ? LIMIT 2", (acc,)):
@@ -152,16 +213,13 @@ def retrieve_context(conn, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
         for r in _rows(cursor, "SELECT * FROM cdr_records WHERE first_bts_location LIKE ? OR roaming_network_circle LIKE ? LIMIT 5", (pat, pat)):
             push("cdr_records", r["cdr_id"], _cdr_snippet(r))
 
-    # 3. High-level analytic intents (top movers / suspicious / layering)
-    #    Only inject general context when the query is genuinely exploratory.
-    #    Do NOT inject random high-value records for a specific-ID lookup
-    #    that simply failed regex extraction — that causes hallucination.
+    # 3. High-level analytic intents (top movers / suspicious / anomalies / layering)
     ql = query.lower()
     if not out:
-        # 3a. Last-resort: try a case-insensitive LIKE search in case the
-        #     user pasted an identifier that our regexes did not catch.
         _candidate = _extract_candidate_id(query)
         if _candidate:
+            for r in _rows(cursor, "SELECT * FROM anomaly_records WHERE transaction_id = ? OR customer_id = ? COLLATE NOCASE LIMIT 2", (_candidate, _candidate)):
+                push("anomaly_records", r["anomaly_id"], _anomaly_snippet(r))
             for r in _rows(cursor, "SELECT * FROM bank_transactions WHERE transaction_id = ? COLLATE NOCASE LIMIT 3", (_candidate,)):
                 push("bank_transactions", r["transaction_id"], _txn_snippet(r))
             for r in _rows(cursor, "SELECT * FROM cdr_records WHERE cdr_id = ? COLLATE NOCASE LIMIT 3", (_candidate,)):
@@ -169,9 +227,11 @@ def retrieve_context(conn, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
             for r in _rows(cursor, "SELECT * FROM ipdr_records WHERE ipdr_id = ? COLLATE NOCASE LIMIT 3", (_candidate,)):
                 push("ipdr_records", r["ipdr_id"], _ipdr_snippet(r))
 
-        # 3b. Analytic / exploratory queries
         if not out:
-            if any(w in ql for w in ("largest", "top", "highest", "biggest", "high value", "large")):
+            if any(w in ql for w in ("anomal", "flagged", "alert", "suspicious", "mule", "fraud", "risk")):
+                for r in _rows(cursor, "SELECT * FROM anomaly_records ORDER BY risk_score DESC LIMIT 8"):
+                    push("anomaly_records", r["anomaly_id"], _anomaly_snippet(r))
+            elif any(w in ql for w in ("largest", "top", "highest", "biggest", "high value", "large")):
                 for r in _rows(cursor, "SELECT * FROM bank_transactions ORDER BY transaction_amount DESC LIMIT 8"):
                     push("bank_transactions", r["transaction_id"], _txn_snippet(r))
             elif any(w in ql for w in ("call", "cdr", "phone", "telecom")):
@@ -183,13 +243,9 @@ def retrieve_context(conn, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
             elif any(w in ql for w in ("complaint", "ncrp", "fraud account")):
                 for r in _rows(cursor, "SELECT * FROM complaints LIMIT 8"):
                     push("complaints", r.get("complaint_id"), f"NCRP complaint {r.get('complaint_id')} acc={r.get('account_no')} state={r.get('state')} {r.get('complainant_name')}")
-            elif any(w in ql for w in ("all", "summary", "overview", "list", "show",
-                                       "recent", "suspicious", "anomal", "flagged",
-                                       "mule", "layering", "fraud")):
+            elif any(w in ql for w in ("all", "summary", "overview", "list", "show", "recent")):
                 for r in _rows(cursor, "SELECT * FROM bank_transactions ORDER BY transaction_amount DESC LIMIT 8"):
                     push("bank_transactions", r["transaction_id"], _txn_snippet(r))
-            # else: leave out empty — do NOT inject random records for
-            # specific lookups that simply failed extraction.
 
     return out[:top_k]
 
@@ -206,26 +262,19 @@ def format_context(rows: List[Dict[str, Any]]) -> str:
 
 def best_entity_hint(hints: Dict[str, List[str]]) -> Optional[str]:
     """Best single entity to seed the linking tree, if any was mentioned."""
-    for key in ("txn", "cdr", "ipdr", "account", "phone", "imei", "ip"):
+    for key in ("txn", "cdr", "ipdr", "account", "phone", "imei", "ip", "name"):
         if hints.get(key):
             return hints[key][0]
     return None
 
 
-# ---------------------------------------------------------------------------
-# Fallback identifier extraction — catches any contiguous alphanumeric token
-# ≥ 6 chars that looks like a database identifier the user pasted but that
-# our typed regexes did not match.  Deliberately conservative: only triggers
-# inside `retrieve_context` as a last resort before the generic fallback.
-# ---------------------------------------------------------------------------
 _CANDIDATE_ID_RE = re.compile(
-    r"\b([A-Za-z]{2,6}\d[A-Za-z0-9]{4,})\b"  # letter prefix + digit + alphanum tail
+    r"\b([A-Za-z]{2,6}\d[A-Za-z0-9]{4,})\b"
 )
 
 
 def _extract_candidate_id(query: str) -> Optional[str]:
     """Returns the most likely database identifier from the query, or None."""
-    # Skip very common English words that happen to match the pattern
     _STOP = {"the", "and", "for", "from", "with", "that", "this", "have",
              "show", "find", "give", "what", "when", "where", "which",
              "about", "account", "transaction", "details", "record"}

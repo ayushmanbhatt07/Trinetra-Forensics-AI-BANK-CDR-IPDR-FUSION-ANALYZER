@@ -162,10 +162,13 @@ def account_features(bundle: dict) -> list[dict]:
             if day:
                 daily[day] += 1
             cust = r.get("customer_id") or acc
-        daily = days_by_cust.get(acc, {})
-
-        per_phone_calls = sum(calls_by_phone.get(p, 0) for p in phones)
-        per_phone_sessions = sum(sessions_by_phone.get(p, 0) for p in phones)
+            if day:
+                days_by_cust[cust][day] += 1
+            for ph in (r.get("sender_phone"), r.get("receiver_phone")):
+                if not ph:
+                    continue
+                per_phone_calls += calls_by_phone.get(ph, 0)
+                per_phone_sessions += sessions_by_phone.get(ph, 0)
 
         prior_ben: set[str] = set()
         new_ben = 0
@@ -177,40 +180,33 @@ def account_features(bundle: dict) -> list[dict]:
                 prior_ben.add(recv)
         new_ben_share = (new_ben / n) if n else 0.0
 
-        times = sorted(float(r.get("ts") or 0.0) for r in rows_acc if r.get("ts"))
+        times = sorted(float(r.get("ts") or 0.0) for r in rows_acc
+                       if r.get("ts"))
         max_burst = 0
         if times:
-            left = 0
-            for right in range(len(times)):
-                while times[right] - times[left] > 1800:
-                    left += 1
-                b = right - left + 1
-                if b > max_burst:
-                    max_burst = b
+            for i, ts in enumerate(times):
+                j = i
+                while j + 1 < len(times) and times[j + 1] - ts <= 1800:
+                    j += 1
+                max_burst = max(max_burst, j - i + 1)
 
         max_daily = max(daily.values()) if daily else 0
-        daily_counts = list(daily.values())
+        daily_counts = [count for cust in days_by_cust
+                        for count in days_by_cust[cust].values()]
         avg_daily = sum(daily_counts) / len(daily_counts) if daily_counts else 0.0
         midnight = sum(1 for r in rows_acc if local_hour(r) in (0, 1, 2, 3))
 
-        sorted_amts = sorted(amounts)
-        num_amts = len(sorted_amts)
-        avg_amt = (sum(sorted_amts) / num_amts) if num_amts else 0.0
-        max_amt = sorted_amts[-1] if num_amts else 0.0
-        p99_idx = min(num_amts - 1, int(num_amts * 0.99))
-        p99_amt = sorted_amts[p99_idx] if num_amts else 0.0
-        variance = sum((x - avg_amt) ** 2 for x in sorted_amts) / num_amts if num_amts > 1 else 0.0
-        std_amt = variance ** 0.5
-
+        arr = np.array(amounts, dtype=float)
         rows.append({
             "account_no": acc,
             "txn_count": n,
             "total_credit": round(cred, 2),
             "total_debit": round(deb, 2),
-            "avg_amount": round(avg_amt, 2),
-            "max_amount": round(max_amt, 2),
-            "p99_amount": round(p99_amt, 2),
-            "std_amount": round(std_amt, 2),
+            "avg_amount": round(float(arr.mean()), 2),
+            "max_amount": round(float(arr.max()), 2) if len(arr) else 0.0,
+            "p99_amount": round(float(np.percentile(arr, 99)), 2)
+                          if len(arr) else 0.0,
+            "std_amount": round(float(arr.std()), 2) if len(arr) else 0.0,
             "uniq_counterparties": len(counterparties),
             "uniq_phones": len(phones),
             "uniq_upi": len(upis),
@@ -371,23 +367,21 @@ def transaction_features(bundle: dict) -> tuple[list[dict], np.ndarray]:
             hist = imei_by_phone.get(phone) or []
             if hist:
                 i_prior = bisect.bisect_left(hist, (ts, ""))
-                if i_prior < len(hist):
-                    near = {hist[j][1] for j in range(i_prior, min(len(hist), i_prior + 10)) if hist[j][0] < ts + 3600}
-                    if near:
-                        prior_imeis = {hist[j][1] for j in range(i_prior)}
-                        if near - prior_imeis:
-                            novel_imei = 1
+                near = {v for t, v in hist[i_prior:] if t < ts + 3600}
+                if near:
+                    prior_imeis = {v for _, v in hist[:i_prior]}
+                    if near - prior_imeis:
+                        novel_imei = 1
         novel_cell = 0
         if ts and phone:
             hist = cell_by_phone.get(phone) or []
             if hist:
                 i_prior = bisect.bisect_left(hist, (ts, ""))
-                if i_prior < len(hist):
-                    near = {hist[j][1] for j in range(i_prior, min(len(hist), i_prior + 10)) if hist[j][0] < ts + 3600}
-                    if near:
-                        prior_cells = {hist[j][1] for j in range(i_prior)}
-                        if near - prior_cells:
-                            novel_cell = 1
+                near = {v for t, v in hist[i_prior:] if t < ts + 3600}
+                if near:
+                    prior_cells = {v for _, v in hist[:i_prior]}
+                    if near - prior_cells:
+                        novel_cell = 1
         rows_out.append({
             "txn_id": tid,
             "log_amount": float(np.log1p(amt)),
@@ -421,8 +415,10 @@ def txn_ml_scores(bundle: dict, cap_z: float = 8.0) -> dict[str, float]:
         return {}
     std = mat.std(axis=0)
     std[std == 0] = 1.0
-    z = np.abs((mat - mat.mean(axis=0)) / std)
+    z = np.abs((mat - np.nanmean(mat, axis=0)) / std)
+    z = np.nan_to_num(z, nan=0.0)
     z = np.minimum(z, cap_z)
     magnitude = np.clip((z.max(axis=1) - 2.0) * (100.0 / 6.0), 0.0, 100.0)
+    magnitude = np.nan_to_num(magnitude, nan=0.0)
     return {r["txn_id"]: round(float(magnitude[i]), 2)
             for i, r in enumerate(rows) if r["txn_id"]}

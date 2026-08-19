@@ -3,6 +3,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional, Union, List, Dict, Any, Tuple
 import logging
+import bisect
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,12 @@ _BC_LINK_COLS = ("transaction_id", "cdr_id", "relationship_type",
 _CI_LINK_COLS = ("cdr_id", "ipdr_id", "relationship_type",
                  "time_difference_seconds", "is_correlated")
 
-_ANOMALY_COLS = ("anomaly_id", "customer_id", "transaction_id", "cdr_ids",
-                 "ipdr_ids", "scenario_type", "difficulty", "source_scope",
-                 "is_suspicious")
+_ANOMALY_COLS = (
+    "anomaly_id", "customer_id", "customer_name", "account_no",
+    "transaction_id", "cdr_ids", "ipdr_ids", "scenario_type",
+    "risk_score", "risk_band", "rules_fired", "amount",
+    "difficulty", "source_scope", "is_suspicious",
+)
 
 _COMPLAINT_COLS = ("complaint_id", "acknowledgement_no", "account_no", "ifsc",
                    "state", "district", "police_station", "complainant_name",
@@ -87,6 +91,7 @@ class CopilotDBBuilder:
         """Loads all reduced datasets and creates indexed SQLite tables."""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        self._create_schema(conn)
 
         # Load datasets
         bank_csv = self.data_dir / "bank_reduced.csv"
@@ -166,7 +171,9 @@ class CopilotDBBuilder:
         self._insert_rows(conn, "complaints", _COMPLAINT_COLS,
                           [self._complaint_row(r) for r in bundle.get("complaints", [])])
         self._insert_rows(conn, "subscribers", _SUBSCRIBER_COLS,
-                          [self._subscriber_row(r) for r in bundle.get("subscribers", [])])
+                          self._subscribers_from_bundle(bundle))
+        self._insert_rows(conn, "anomaly_records", _ANOMALY_COLS,
+                          self._anomaly_rows_from_bundle(bundle))
 
         self._create_indices(conn)
         self.conn = conn
@@ -179,9 +186,14 @@ class CopilotDBBuilder:
 
     @staticmethod
     def _bank_row(r: dict) -> list:
-        amount = (r.get("credit") if r.get("txn_type") == "C" else r.get("debit")) or 0
+        amt_raw = r.get("amount") or r.get("transaction_amount")
+        if amt_raw is None or amt_raw == 0:
+            if r.get("txn_type") == "C":
+                amt_raw = r.get("credit") or r.get("amount") or 0
+            else:
+                amt_raw = r.get("debit") or r.get("credit") or r.get("amount") or 0
         try:
-            amount = float(amount)
+            amount = float(amt_raw or 0.0)
         except (TypeError, ValueError):
             amount = 0.0
         date = str(r.get("date") or "")
@@ -195,23 +207,23 @@ class CopilotDBBuilder:
             date,
             timestamp,
             str(r.get("txn_ref_number") or r.get("narration") or ""),
-            str(r.get("mode") or ""),
+            str(r.get("mode") or r.get("transaction_mode") or ""),
             str(r.get("currency") or "INR"),
             amount,
-            str(r.get("customer_id") or ""),
-            str(r.get("account_name") or ""),
-            str(r.get("bank") or ""),
-            str(r.get("account_no") or ""),
-            str(r.get("account_type") or ""),
-            str(r.get("ifsc") or ""),
-            str(r.get("sender_phone") or ""),
-            str(r.get("counterparty_customer_id") or ""),
-            str(r.get("counterparty_name") or ""),
-            str(r.get("counterparty_bank") or ""),
-            str(r.get("receiver_account") or ""),
-            str(r.get("counterparty_account_type") or ""),
-            str(r.get("receiver_ifsc") or ""),
-            str(r.get("receiver_phone") or ""),
+            str(r.get("customer_id") or r.get("sender_customer_id") or ""),
+            str(r.get("sender_customer_name") or r.get("account_name") or r.get("customer_name") or ""),
+            str(r.get("bank") or r.get("sender_bank_name") or ""),
+            str(r.get("sender_account_number") or r.get("account_no") or r.get("sender_account") or ""),
+            str(r.get("account_type") or r.get("sender_account_type") or ""),
+            str(r.get("ifsc") or r.get("sender_ifsc") or ""),
+            str(r.get("sender_phone_number") or r.get("sender_phone") or r.get("phone") or ""),
+            str(r.get("counterparty_customer_id") or r.get("receiver_customer_id") or ""),
+            str(r.get("receiver_customer_name") or r.get("counterparty_name") or r.get("beneficiary_name") or ""),
+            str(r.get("counterparty_bank") or r.get("receiver_bank_name") or ""),
+            str(r.get("receiver_account_number") or r.get("receiver_account") or r.get("counterparty_account") or ""),
+            str(r.get("counterparty_account_type") or r.get("receiver_account_type") or ""),
+            str(r.get("receiver_ifsc") or r.get("counterparty_ifsc") or ""),
+            str(r.get("receiver_phone_number") or r.get("receiver_phone") or r.get("counterparty_phone") or ""),
         ]
 
     @staticmethod
@@ -284,6 +296,121 @@ class CopilotDBBuilder:
             str(r.get("operator") or ""),
         ]
 
+    @staticmethod
+    def _subscribers_from_bundle(bundle: dict) -> List[list]:
+        explicit = bundle.get("subscribers", [])
+        if explicit:
+            return [CopilotDBBuilder._subscriber_row(r) for r in explicit]
+
+        seen_phones = set()
+        subs = []
+        for r in bundle.get("bank", []):
+            ph = str(r.get("sender_phone") or "").strip()
+            name = str(r.get("account_name") or r.get("customer_name") or "").strip()
+            if ph and ph not in seen_phones:
+                seen_phones.add(ph)
+                subs.append([ph, "", "", name, "", ""])
+            rph = str(r.get("receiver_phone") or "").strip()
+            rname = str(r.get("counterparty_name") or "").strip()
+            if rph and rph not in seen_phones:
+                seen_phones.add(rph)
+                subs.append([rph, "", "", rname, "", ""])
+        for c in bundle.get("cdr", []):
+            a_ph = str(c.get("a_number") or "").strip()
+            circle = str(c.get("roaming_circle") or "").strip()
+            imsi = str(c.get("imsi") or "").strip()
+            imei = str(c.get("imei") or "").strip()
+            if a_ph and a_ph not in seen_phones:
+                seen_phones.add(a_ph)
+                subs.append([a_ph, imsi, imei, "", circle, ""])
+            b_ph = str(c.get("b_number") or "").strip()
+            if b_ph and b_ph not in seen_phones:
+                seen_phones.add(b_ph)
+                subs.append([b_ph, "", "", "", "", ""])
+        return subs
+
+    @staticmethod
+    def _anomaly_rows_from_bundle(bundle: dict) -> List[list]:
+        bank = bundle.get("bank", [])
+        if not bank:
+            return []
+
+        scored_dict = {}
+        try:
+            from backend.risk import hybrid
+            res = hybrid.hybrid_analyze_fast(bundle)
+            if not res:
+                res = hybrid.hybrid_analyze(bundle)
+            scored_dict = res.get("transactions", {})
+        except Exception as e:
+            logger.warning(f"Could not compute hybrid anomaly scores for copilot db: {e}")
+
+        bank_by_id = {str(r.get("txn_id") or r.get("transaction_id") or ""): r for r in bank}
+        rows = []
+
+        if scored_dict:
+            for tid, s in scored_dict.items():
+                if not isinstance(s, dict):
+                    continue
+                risk_score = float(s.get("risk_score") or 0.0)
+                if risk_score < 50.0:
+                    continue
+                raw = bank_by_id.get(str(tid), {})
+                cust_id = str(s.get("sender_customer_id") or raw.get("customer_id") or raw.get("sender_customer_id") or "")
+                cust_name = str(raw.get("account_name") or raw.get("customer_name") or raw.get("sender_customer_name") or "")
+                acc_no = str(s.get("account_no") or raw.get("account_no") or "")
+                scenarios = s.get("scenarios") or []
+                primary_scenario = scenarios[0].get("scenario") if scenarios else (s.get("rules_fired", ["UNKNOWN"])[0] if s.get("rules_fired") else "Anomaly")
+                rules_fired = s.get("rules_fired") or []
+                rules_str = ",".join(rules_fired) if isinstance(rules_fired, list) else str(rules_fired)
+                amount = float(s.get("amount") or raw.get("debit") or raw.get("credit") or 0.0)
+                risk_band = str(s.get("risk_band") or ("CRITICAL" if risk_score >= 75 else "HIGH"))
+                diff = "CRITICAL" if risk_score >= 75 else "HIGH"
+
+                rows.append([
+                    f"ANOM_{tid}",
+                    cust_id,
+                    cust_name,
+                    acc_no,
+                    str(tid),
+                    "",
+                    "",
+                    primary_scenario,
+                    risk_score,
+                    risk_band,
+                    rules_str,
+                    amount,
+                    diff,
+                    "bank_cdr_ipdr_fusion",
+                    1,
+                ])
+        else:
+            for r in bank:
+                tid = str(r.get("txn_id") or r.get("transaction_id") or "")
+                amt = float(r.get("debit") or r.get("credit") or 0.0)
+                cust_name = str(r.get("account_name") or r.get("customer_name") or "")
+                cust_id = str(r.get("customer_id") or "")
+                acc_no = str(r.get("account_no") or "")
+                if amt >= 100000:
+                    rows.append([
+                        f"ANOM_{tid}",
+                        cust_id,
+                        cust_name,
+                        acc_no,
+                        tid,
+                        "",
+                        "",
+                        "High Value Transfer",
+                        75.0,
+                        "HIGH",
+                        "HIGH_VALUE_TRANSFER",
+                        amt,
+                        "HIGH",
+                        "bank_transactions",
+                        1,
+                    ])
+        return rows
+
     # ------------------------------------------------------------ linking
 
     @staticmethod
@@ -291,10 +418,16 @@ class CopilotDBBuilder:
                        window: int) -> List[list]:
         cdr_by_phone: dict[str, list[dict]] = {}
         for c in cdr:
-            if not c.get("cdr_id"):
+            if not c.get("cdr_id") or c.get("ts") is None:
                 continue
             for p in _cdr_party_phones(c):
                 cdr_by_phone.setdefault(p, []).append(c)
+                
+        cdr_indexed: dict[str, tuple[list[float], list[dict]]] = {}
+        for p, clist in cdr_by_phone.items():
+            clist.sort(key=lambda x: x["ts"])
+            cdr_indexed[p] = ([x["ts"] for x in clist], clist)
+            
         best: dict[tuple, float] = {}
         for r in bank:
             phones = {_norm_phone(r.get("receiver_phone")),
@@ -305,11 +438,14 @@ class CopilotDBBuilder:
             if txn_ts is None or not txn_id:
                 continue
             for ph in phones:
-                for c in cdr_by_phone.get(ph, ()):
-                    cts = c.get("ts")
-                    if cts is None or abs(txn_ts - cts) > window:
-                        continue
-                    key = (str(txn_id), str(c.get("cdr_id")))
+                if ph not in cdr_indexed:
+                    continue
+                k_ts, c_list = cdr_indexed[ph]
+                idx_start = bisect.bisect_left(k_ts, txn_ts - window)
+                idx_end = bisect.bisect_right(k_ts, txn_ts + window)
+                for c in c_list[idx_start:idx_end]:
+                    cts = c["ts"]
+                    key = (str(txn_id), str(c["cdr_id"]))
                     delta = abs(cts - txn_ts)
                     if key not in best or delta < best[key]:
                         best[key] = delta
@@ -328,33 +464,36 @@ class CopilotDBBuilder:
             return out
 
         cdr_by_key: dict[str, list[dict]] = {}
-        cdr_by_id: dict[str, dict] = {}
         for c in cdr:
-            if not c.get("cdr_id"):
+            if not c.get("cdr_id") or c.get("ts") is None:
                 continue
-            cdr_by_id[str(c["cdr_id"])] = c
             for k in keys(c, ("imsi", "imei")):
                 cdr_by_key.setdefault(k, []).append(c)
+                
+        cdr_indexed: dict[str, tuple[list[float], list[dict]]] = {}
+        for k, clist in cdr_by_key.items():
+            clist.sort(key=lambda x: x["ts"])
+            cdr_indexed[k] = ([x["ts"] for x in clist], clist)
+            
         rows = []
         for i in ipdr:
             ipdr_id = i.get("ipdr_id")
-            if not ipdr_id:
-                continue
-            matched: set[str] = set()
-            for k in keys(i, ("imsi", "imei", "msisdn")):
-                matched.update(c.get("cdr_id") for c in cdr_by_key.get(k, ()))
             its = i.get("start_ts")
-            for cdr_id in matched:
-                c = cdr_by_id.get(str(cdr_id))
-                if c is None:
+            if not ipdr_id or its is None:
+                continue
+                
+            for k in keys(i, ("imsi", "imei", "msisdn")):
+                if k not in cdr_indexed:
                     continue
-                cts = c.get("ts")
-                if cts is None or its is None or abs(cts - its) > window:
-                    continue
-                rows.append([
-                    str(cdr_id), str(ipdr_id),
-                    "cdr_ipdr_correlation", float(cts - its), 1,
-                ])
+                k_ts, c_list = cdr_indexed[k]
+                idx_start = bisect.bisect_left(k_ts, its - window)
+                idx_end = bisect.bisect_right(k_ts, its + window)
+                for c in c_list[idx_start:idx_end]:
+                    cts = c["ts"]
+                    rows.append([
+                        str(c["cdr_id"]), str(ipdr_id),
+                        "cdr_ipdr_correlation", float(abs(cts - its)), 1,
+                    ])
         return rows
 
     # ------------------------------------------------------------ schema
@@ -397,9 +536,11 @@ class CopilotDBBuilder:
             time_difference_seconds REAL, is_correlated INTEGER
         );
         CREATE TABLE IF NOT EXISTS anomaly_records (
-            anomaly_id TEXT, customer_id TEXT, transaction_id TEXT,
-            cdr_ids TEXT, ipdr_ids TEXT, scenario_type TEXT, difficulty TEXT,
-            source_scope TEXT, is_suspicious INTEGER
+            anomaly_id TEXT, customer_id TEXT, customer_name TEXT,
+            account_no TEXT, transaction_id TEXT, cdr_ids TEXT,
+            ipdr_ids TEXT, scenario_type TEXT, risk_score REAL,
+            risk_band TEXT, rules_fired TEXT, amount REAL,
+            difficulty TEXT, source_scope TEXT, is_suspicious INTEGER
         );
         CREATE TABLE IF NOT EXISTS complaints (
             complaint_id TEXT, acknowledgement_no TEXT, account_no TEXT,
@@ -428,39 +569,46 @@ class CopilotDBBuilder:
     def _create_indices(self, conn: sqlite3.Connection) -> None:
         """Creates indices to ensure real-time query execution."""
         cursor = conn.cursor()
-
-        # Bank indices
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bank_tx_id ON bank_transactions(transaction_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bank_sender_acc ON bank_transactions(sender_account_number);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bank_receiver_acc ON bank_transactions(receiver_account_number);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bank_sender_phone ON bank_transactions(sender_phone_number);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bank_receiver_phone ON bank_transactions(receiver_phone_number);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bank_ts ON bank_transactions(timestamp);")
-
-        # CDR indices
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cdr_id ON cdr_records(cdr_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cdr_a_party ON cdr_records(a_party_number);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cdr_b_party ON cdr_records(b_party_number);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cdr_bts ON cdr_records(first_bts_location);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cdr_imsi ON cdr_records(imsi);")
-
-        # IPDR indices
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ipdr_id ON ipdr_records(ipdr_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ipdr_msisdn ON ipdr_records(subscriber_msisdn);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ipdr_imsi ON ipdr_records(subscriber_imsi);")
-
-        # Link indices
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_b_cdr_tx ON bank_cdr_links(transaction_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_b_cdr_cdr ON bank_cdr_links(cdr_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_c_ipdr_cdr ON cdr_ipdr_links(cdr_id);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_c_ipdr_ipdr ON cdr_ipdr_links(ipdr_id);")
-
-        # Complaint / subscriber indices
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_complaints_acc ON complaints(account_no);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_complaints_mobile ON complaints(mobile);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sub_phone ON subscribers(phone);")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sub_imsi ON subscribers(imsi);")
-
+        index_queries = [
+            # Bank indices
+            "CREATE INDEX IF NOT EXISTS idx_bank_tx_id ON bank_transactions(transaction_id);",
+            "CREATE INDEX IF NOT EXISTS idx_bank_sender_acc ON bank_transactions(sender_account_number);",
+            "CREATE INDEX IF NOT EXISTS idx_bank_receiver_acc ON bank_transactions(receiver_account_number);",
+            "CREATE INDEX IF NOT EXISTS idx_bank_sender_phone ON bank_transactions(sender_phone_number);",
+            "CREATE INDEX IF NOT EXISTS idx_bank_receiver_phone ON bank_transactions(receiver_phone_number);",
+            "CREATE INDEX IF NOT EXISTS idx_bank_ts ON bank_transactions(timestamp);",
+            # CDR indices
+            "CREATE INDEX IF NOT EXISTS idx_cdr_id ON cdr_records(cdr_id);",
+            "CREATE INDEX IF NOT EXISTS idx_cdr_a_party ON cdr_records(a_party_number);",
+            "CREATE INDEX IF NOT EXISTS idx_cdr_b_party ON cdr_records(b_party_number);",
+            "CREATE INDEX IF NOT EXISTS idx_cdr_bts ON cdr_records(first_bts_location);",
+            "CREATE INDEX IF NOT EXISTS idx_cdr_imsi ON cdr_records(imsi);",
+            # IPDR indices
+            "CREATE INDEX IF NOT EXISTS idx_ipdr_id ON ipdr_records(ipdr_id);",
+            "CREATE INDEX IF NOT EXISTS idx_ipdr_msisdn ON ipdr_records(subscriber_msisdn);",
+            "CREATE INDEX IF NOT EXISTS idx_ipdr_imsi ON ipdr_records(subscriber_imsi);",
+            # Link indices
+            "CREATE INDEX IF NOT EXISTS idx_b_cdr_tx ON bank_cdr_links(transaction_id);",
+            "CREATE INDEX IF NOT EXISTS idx_b_cdr_cdr ON bank_cdr_links(cdr_id);",
+            "CREATE INDEX IF NOT EXISTS idx_c_ipdr_cdr ON cdr_ipdr_links(cdr_id);",
+            "CREATE INDEX IF NOT EXISTS idx_c_ipdr_ipdr ON cdr_ipdr_links(ipdr_id);",
+            # Anomaly indices
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_tx ON anomaly_records(transaction_id);",
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_cust ON anomaly_records(customer_id);",
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_name ON anomaly_records(customer_name);",
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_acc ON anomaly_records(account_no);",
+            "CREATE INDEX IF NOT EXISTS idx_anomaly_risk ON anomaly_records(risk_score);",
+            # Complaint / subscriber indices
+            "CREATE INDEX IF NOT EXISTS idx_complaint_acc ON complaints(account_no);",
+            "CREATE INDEX IF NOT EXISTS idx_complaints_mobile ON complaints(mobile);",
+            "CREATE INDEX IF NOT EXISTS idx_subscriber_phone ON subscribers(phone);",
+            "CREATE INDEX IF NOT EXISTS idx_sub_imsi ON subscribers(imsi);",
+        ]
+        for query in index_queries:
+            try:
+                cursor.execute(query)
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
