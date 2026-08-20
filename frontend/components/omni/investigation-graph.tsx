@@ -79,11 +79,18 @@ interface GraphNode {
   id: string;
   kind: string;
   label: string;
+  name?: string;
+  phone?: string;
   hop_distance: number;
   risk: number;
   centrality: number;
   role?: string;
   suspicion?: string;
+  sender?: string;
+  receiver?: string;
+  sender_name?: string;
+  receiver_name?: string;
+  amount?: number;
   // force-graph internals
   x?: number;
   y?: number;
@@ -142,15 +149,19 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
       const nodes: GraphNode[] = data.nodes
         .filter((n: any) => n.id === target || (n.kind !== 'unknown' && n.label !== 'Unknown Entity' && !String(n.id).toLowerCase().includes('unknown')))
         .map((n: any) => ({
-        id: n.id,
-        kind: (n.kind || 'unknown').toLowerCase(),
-        label: n.label || n.id,
-        hop_distance: n.hop_distance || 0,
-        risk: n.risk || 0,
-        centrality: n.centrality || 0,
-        role: n.role || '',
-        suspicion: n.suspicion || '',
-      }));
+          id: n.id,
+          kind: (n.kind || 'unknown').toLowerCase(),
+          label: n.label || n.id,
+          name: n.name && n.name !== 'Unknown Entity' ? n.name : (n.label && n.label !== n.id ? n.label : ''),
+          phone: n.phone || '',
+          hop_distance: n.hop_distance || 0,
+          risk: n.risk || 0,
+          centrality: n.centrality || 0,
+          role: n.role || '',
+          suspicion: n.suspicion || '',
+        }));
+
+      const nodeMap = new Map(nodes.map(n => [n.id, n]));
 
       const nodeIds = new Set(nodes.map(n => n.id));
       let links: GraphEdge[] = data.edges
@@ -170,10 +181,23 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
       const targetIsEdge = links.find((e: any) => e.tx_id === target || e.cdr_id === target);
       if (targetIsEdge && !nodes.find(n => n.id === target)) {
         const isTxn = targetIsEdge.tx_id === target;
+        const sourceNode = nodeMap.get(String(targetIsEdge.source));
+        const targetNode = nodeMap.get(String(targetIsEdge.target));
+
+        const sName = sourceNode?.name || sourceNode?.label || String(targetIsEdge.source);
+        const tName = targetNode?.name || targetNode?.label || String(targetIsEdge.target);
+        const flowName = `${sName} → ${tName}`;
+
         nodes.push({
           id: target,
           kind: isTxn ? 'txn' : 'phone',
           label: (isTxn ? 'Txn ' : 'Call ') + target,
+          name: flowName,
+          sender: String(targetIsEdge.source),
+          receiver: String(targetIsEdge.target),
+          sender_name: sName,
+          receiver_name: tName,
+          amount: targetIsEdge.amount,
           hop_distance: 0,
           risk: 100,
           centrality: 1,
@@ -427,38 +451,135 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
 
       {/* ── hover kpi card ────────────────────────────────────────────── */}
       {hoveredNode && !selectedNode && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-[350px] pointer-events-none">
-          <div className="bg-slate-900/95 backdrop-blur-md p-4 rounded-xl border border-slate-700 shadow-2xl">
-            <div className="flex items-center gap-3 mb-2">
-              <span className="w-3 h-3 rounded-full" style={{ background: nodeColor(hoveredNode) }}></span>
-              <strong className="text-sm text-slate-100 font-mono break-all">{hoveredNode.label || hoveredNode.id}</strong>
-            </div>
-            <div className="grid grid-cols-2 gap-2 mb-2">
-              <div className="bg-slate-800/50 p-2 rounded">
-                <p className="text-[10px] uppercase text-slate-500">Kind</p>
-                <p className="text-xs text-slate-300 capitalize">{hoveredNode.kind}</p>
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 w-[370px] pointer-events-none">
+          {(() => {
+            const isRoot = hoveredNode.id && entityId && String(hoveredNode.id).trim().toLowerCase() === String(entityId).trim().toLowerCase();
+            const isRed = (hoveredNode.risk > 80) || (hoveredNode.suspicion && typeof hoveredNode.suspicion === 'string' && hoveredNode.suspicion.toLowerCase() !== 'none' && hoveredNode.suspicion.trim().length > 3);
+            const isBlue = hoveredNode.kind === 'account' && !isRoot;
+            const isTxn = hoveredNode.kind === 'txn';
+            
+            const nColor = nodeColor(hoveredNode);
+            const nameToDisplay = hoveredNode.name && hoveredNode.name !== 'Unknown Entity' && hoveredNode.name !== hoveredNode.id 
+              ? hoveredNode.name 
+              : (hoveredNode.label && hoveredNode.label !== hoveredNode.id ? hoveredNode.label : '');
+
+            return (
+              <div className={`bg-slate-900/95 backdrop-blur-md p-4 rounded-xl border shadow-2xl space-y-2.5 ${
+                isRed ? 'border-rose-600/70 shadow-rose-950/40' : isBlue ? 'border-blue-600/60' : isTxn || isRoot ? 'border-amber-600/60 shadow-amber-950/30' : 'border-slate-700'
+              }`}>
+                {/* Header with node indicator color, type & primary title */}
+                <div className="flex items-center gap-3">
+                  <span className="w-3.5 h-3.5 rounded-full shrink-0 shadow-lg" style={{ background: nColor }}></span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                      {isTxn ? 'Transaction Entity' : isBlue ? 'Bank Account Entity' : isRed ? 'High-Risk / Suspicious Entity' : `${hoveredNode.kind} Entity`}
+                    </p>
+                    <strong className="text-sm text-slate-100 font-semibold break-all leading-tight block">
+                      {nameToDisplay || (isTxn ? `Txn ${hoveredNode.id}` : hoveredNode.id)}
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-slate-800/60 p-2 rounded-lg border border-slate-700/50">
+                    <p className="text-[10px] uppercase text-slate-400 font-medium">Kind</p>
+                    <p className="text-xs text-slate-200 capitalize font-medium">{hoveredNode.kind}</p>
+                  </div>
+                  <div className={`p-2 rounded-lg border ${isRed ? 'bg-rose-950/40 border-rose-800/40' : 'bg-slate-800/60 border-slate-700/50'}`}>
+                    <p className="text-[10px] uppercase text-slate-400 font-medium">Risk / Suspicion</p>
+                    <p className={`text-xs font-semibold capitalize ${isRed ? 'text-rose-400' : 'text-amber-400'}`}>
+                      {hoveredNode.suspicion || (hoveredNode.risk > 0 ? `${hoveredNode.risk} Score` : 'None')}
+                    </p>
+                  </div>
+                </div>
+
+                {hoveredNode.role && (
+                  <div className="bg-cyan-950/30 p-2 rounded-lg border border-cyan-800/40">
+                    <p className="text-[10px] uppercase text-cyan-400 font-medium">Role</p>
+                    <p className="text-xs text-cyan-200 font-medium">{hoveredNode.role}</p>
+                  </div>
+                )}
+
+                {/* 🔴 RED ENTITIES (High-Risk / Anomalous) */}
+                {isRed && (
+                  <div className="bg-rose-950/40 p-2.5 rounded-lg border border-rose-800/50 space-y-1.5">
+                    <p className="text-[10px] uppercase font-bold text-rose-400 tracking-wider">⚠️ High-Risk Entity Details</p>
+                    <div>
+                      <p className="text-[10px] text-slate-400">Account / Holder Name</p>
+                      <p className="text-xs font-semibold text-rose-200 break-all">{nameToDisplay || 'Flagged Entity'}</p>
+                    </div>
+                    <div className="flex justify-between items-center text-xs text-slate-300 font-mono">
+                      <span>ID: {hoveredNode.id}</span>
+                      {hoveredNode.phone && <span>Ph: {hoveredNode.phone}</span>}
+                    </div>
+                  </div>
+                )}
+
+                {/* 🔵 BLUE ENTITIES (Bank Accounts) */}
+                {isBlue && !isRed && (
+                  <div className="bg-blue-950/40 p-2.5 rounded-lg border border-blue-800/40 space-y-1.5">
+                    <p className="text-[10px] uppercase font-bold text-cyan-400 tracking-wider">🏦 Bank Account Details</p>
+                    <div>
+                      <p className="text-[10px] text-slate-400">Account Holder Name</p>
+                      <p className="text-xs font-semibold text-cyan-200 break-all">{nameToDisplay || 'Account Holder'}</p>
+                    </div>
+                    <div className="flex justify-between items-center text-xs text-slate-300 font-mono">
+                      <span>Acc No: {hoveredNode.id}</span>
+                      {hoveredNode.phone && <span>Ph: {hoveredNode.phone}</span>}
+                    </div>
+                  </div>
+                )}
+
+                {/* 🟡 YELLOW ENTITIES (Transactions / Root Node) */}
+                {isTxn && (
+                  <div className="bg-amber-950/30 p-2.5 rounded-lg border border-amber-800/40 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] uppercase font-bold text-amber-400 tracking-wider">💸 Transfer Flow & Parties</p>
+                      {hoveredNode.amount ? (
+                        <span className="text-xs font-bold font-mono text-emerald-400">
+                          ₹{Number(hoveredNode.amount).toLocaleString('en-IN')}
+                        </span>
+                      ) : null}
+                    </div>
+                    {nameToDisplay && (
+                      <div>
+                        <p className="text-[10px] text-slate-400">Sender → Receiver Flow</p>
+                        <p className="text-xs font-semibold text-amber-200 font-mono break-all">{nameToDisplay}</p>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-[10px] text-slate-400">TXN ID</p>
+                      <p className="text-xs text-slate-200 font-mono break-all">{hoveredNode.id}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* OTHER ENTITIES (Phones / IMEI / IP) */}
+                {!isRed && !isBlue && !isTxn && (
+                  <div className="bg-slate-800/50 p-2.5 rounded-lg border border-slate-700/50 space-y-1">
+                    {nameToDisplay && (
+                      <div>
+                        <p className="text-[10px] uppercase text-slate-400 font-medium">Subscriber / Holder Name</p>
+                        <p className="text-xs font-semibold text-emerald-400 break-all">{nameToDisplay}</p>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400 font-medium">
+                        {hoveredNode.kind === 'phone' ? 'Phone No' : 'Entity ID'}
+                      </p>
+                      <p className="text-xs text-slate-300 font-mono break-all">{hoveredNode.id}</p>
+                    </div>
+                  </div>
+                )}
+
+                {hoveredNode.centrality > 0.5 && (
+                  <p className="text-[10px] text-purple-400 pt-0.5 font-medium flex items-center gap-1">
+                    <span>🔗</span> High Centrality Hub
+                  </p>
+                )}
               </div>
-              <div className="bg-slate-800/50 p-2 rounded">
-                <p className="text-[10px] uppercase text-slate-500">Risk / Suspicion</p>
-                <p className="text-xs text-slate-300 capitalize">{hoveredNode.suspicion || (hoveredNode.risk > 0 ? hoveredNode.risk : 'None')}</p>
-              </div>
-            </div>
-            {hoveredNode.role && (
-              <div className="bg-cyan-900/20 p-2 rounded mb-1">
-                <p className="text-[10px] uppercase text-cyan-500">Role</p>
-                <p className="text-xs text-cyan-300">{hoveredNode.role}</p>
-              </div>
-            )}
-            <div className="bg-slate-800/50 p-2 rounded mt-1">
-              <p className="text-[10px] uppercase text-slate-500">
-                {hoveredNode.kind === 'account' ? 'Account No' : hoveredNode.kind === 'txn' ? 'Txn ID' : hoveredNode.kind === 'phone' ? 'Phone No' : 'Entity ID'}
-              </p>
-              <p className="text-xs text-slate-300 font-mono break-all">{hoveredNode.id}</p>
-            </div>
-            {hoveredNode.centrality > 0.5 && (
-              <p className="text-[10px] text-purple-400 mt-2">🔗 High Centrality Hub</p>
-            )}
-          </div>
+            );
+          })()}
         </div>
       )}
 

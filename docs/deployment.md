@@ -75,7 +75,7 @@ Before the first deployment, you must prepare the Ubuntu server:
     ```bash
     nano /opt/trinetra/.env
     ```
-    Populate it with your actual production variables like `GROQ_API_KEY` and `APP_SECRET`. Note: `APP_CORS_ORIGINS` will be updated once the actual frontend production URL is known.
+    Populate it with your actual production variables like `OPEN_ROUTER_KEY_1` and `APP_SECRET`. Note: `APP_CORS_ORIGINS` will be updated once the actual frontend production URL is known.
 
 ## G. Deployment Flow
 

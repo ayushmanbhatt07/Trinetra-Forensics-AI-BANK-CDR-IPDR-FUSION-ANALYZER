@@ -77,7 +77,7 @@ Rather than relying on a single algorithm, the Tri-Netra Risk Engine (`backend/r
 
 | | Model | Provider | Capability |
 |:---:|:---|:---|:---|
-| 🧠 | **Llama-3 (Grounded RAG)** | `Groq` | Translates natural language (EN/HI/GJ) → SQL/Graph queries with zero hallucination |
+| 🧠 | **Nemotron (Grounded RAG)** | `OpenRouter` | Translates natural language (EN/HI/GJ) → SQL/Graph queries with zero hallucination |
 
 
 ---
@@ -166,7 +166,7 @@ graph TD
     subgraph 4. Interface & Reporting
         FastAPI[FastAPI Backend]
         UI[Next.js Dashboard]
-        Copilot[Groq RAG Copilot]
+        Copilot[OpenRouter RAG Copilot]
     end
 
     Detect --> Provider
@@ -244,4 +244,4 @@ For detailed Docker or production setup, see [docs/deployment.md](docs/deploymen
 
 ## 📄 License & Attribution
 
-Distributed under the MIT License. See [docs/attribution.md](docs/attribution.md) for details on third-party libraries, external APIs (Groq), UI libraries, and custom code distinction.
+Distributed under the MIT License. See [docs/attribution.md](docs/attribution.md) for details on third-party libraries, external APIs (OpenRouter), UI libraries, and custom code distinction.

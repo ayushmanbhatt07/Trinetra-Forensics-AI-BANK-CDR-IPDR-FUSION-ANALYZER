@@ -88,6 +88,7 @@ class CopilotDBBuilder:
         """Loads all reduced datasets and creates indexed SQLite tables."""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        self._create_schema(conn)
 
         # Load datasets
         bank_csv = self.data_dir / "bank_reduced.csv"
@@ -180,81 +181,108 @@ class CopilotDBBuilder:
 
     @staticmethod
     def _bank_row(r: dict) -> list:
-        amount = (r.get("credit") if r.get("txn_type") == "C" else r.get("debit")) or 0
+        txn_type = str(r.get("txn_type") or "D").upper()
+        amount = r.get("transaction_amount")
+        if amount is None:
+            amount = (r.get("credit") if txn_type == "C" else r.get("debit")) or 0
         try:
             amount = float(amount)
         except (TypeError, ValueError):
             amount = 0.0
         date = str(r.get("date") or "")
         time_ = str(r.get("time") or "")
-        timestamp = f"{date} {time_}".strip()
+        timestamp = str(r.get("timestamp") or f"{date} {time_}".strip())
         if not timestamp and r.get("ts") is not None:
             import datetime as _dt
             timestamp = _dt.datetime.utcfromtimestamp(float(r["ts"])).isoformat()
+            
+        s_acc = str(r.get("sender_account_number") or r.get("sender_account_no") or r.get("sender_account") or "")
+        r_acc = str(r.get("receiver_account_number") or r.get("receiver_account_no") or r.get("receiver_account") or "")
+        acc_no = str(r.get("account_no") or r.get("account_number") or "")
+        
+        if not s_acc and not r_acc and acc_no:
+            if txn_type == "C":
+                r_acc = acc_no
+                s_acc = str(r.get("receiver_account") or r.get("counterparty_account") or "")
+            else:
+                s_acc = acc_no
+                r_acc = str(r.get("receiver_account") or r.get("counterparty_account") or "")
+        elif not s_acc and acc_no:
+            s_acc = acc_no
+        elif not r_acc and acc_no:
+            r_acc = acc_no
+
+        s_name = str(r.get("sender_customer_name") or r.get("sender_name") or r.get("account_name") or "")
+        r_name = str(r.get("receiver_customer_name") or r.get("receiver_name") or r.get("counterparty_name") or "")
+        s_phone = _norm_phone(r.get("sender_phone_number") or r.get("sender_phone") or "")
+        r_phone = _norm_phone(r.get("receiver_phone_number") or r.get("receiver_phone") or "")
+        s_bank = str(r.get("sender_bank_name") or r.get("sender_bank") or r.get("bank") or "")
+        r_bank = str(r.get("receiver_bank_name") or r.get("receiver_bank") or r.get("counterparty_bank") or "")
+
         return [
             str(r.get("txn_id") or r.get("transaction_id") or ""),
             date,
             timestamp,
             str(r.get("txn_ref_number") or r.get("narration") or ""),
-            str(r.get("mode") or ""),
+            str(r.get("mode") or r.get("transaction_mode") or ""),
             str(r.get("currency") or "INR"),
             amount,
-            str(r.get("customer_id") or ""),
-            str(r.get("account_name") or ""),
-            str(r.get("bank") or ""),
-            str(r.get("account_no") or ""),
-            str(r.get("account_type") or ""),
-            str(r.get("ifsc") or ""),
-            str(r.get("sender_phone") or ""),
-            str(r.get("counterparty_customer_id") or ""),
-            str(r.get("counterparty_name") or ""),
-            str(r.get("counterparty_bank") or ""),
-            str(r.get("receiver_account") or ""),
-            str(r.get("counterparty_account_type") or ""),
+            str(r.get("customer_id") or r.get("sender_customer_id") or ""),
+            s_name,
+            s_bank,
+            s_acc,
+            str(r.get("account_type") or r.get("sender_account_type") or ""),
+            str(r.get("ifsc") or r.get("sender_ifsc") or ""),
+            s_phone,
+            str(r.get("counterparty_customer_id") or r.get("receiver_customer_id") or ""),
+            r_name,
+            r_bank,
+            r_acc,
+            str(r.get("counterparty_account_type") or r.get("receiver_account_type") or ""),
             str(r.get("receiver_ifsc") or ""),
-            str(r.get("receiver_phone") or ""),
+            r_phone,
         ]
 
     @staticmethod
     def _cdr_row(r: dict) -> list:
-        dur = r.get("duration_sec") or 0
+        dur = r.get("call_duration_seconds") or r.get("duration_sec") or r.get("duration") or 0
         try:
             dur = int(dur)
         except (TypeError, ValueError):
             dur = 0
         return [
             str(r.get("cdr_id") or ""),
-            str(r.get("date") or ""),
-            str(r.get("time") or ""),
-            str(r.get("a_number") or ""),
-            str(r.get("b_number") or ""),
+            str(r.get("call_date") or r.get("date") or ""),
+            str(r.get("call_start_time") or r.get("time") or r.get("start_time") or ""),
+            str(r.get("a_party_number") or r.get("a_number") or ""),
+            str(r.get("b_party_number") or r.get("b_number") or ""),
             str(r.get("call_type") or ""),
             dur,
             str(r.get("imsi") or ""),
             str(r.get("imei") or ""),
-            str(r.get("bts_location_first") or ""),
-            str(r.get("cell_id_first") or ""),
-            str(r.get("roaming_circle") or ""),
+            str(r.get("first_bts_location") or r.get("bts_location_first") or r.get("bts_location") or ""),
+            str(r.get("first_cell_global_id") or r.get("cell_id_first") or r.get("cell_id") or ""),
+            str(r.get("roaming_network_circle") or r.get("roaming_circle") or r.get("circle") or ""),
         ]
 
     @staticmethod
     def _ipdr_row(r: dict) -> list:
-        dur = r.get("duration_sec") or 0
+        dur = r.get("session_duration_seconds") or r.get("duration_sec") or r.get("duration") or 0
         try:
             dur = int(float(dur))
         except (TypeError, ValueError):
             dur = 0
         return [
             str(r.get("ipdr_id") or ""),
-            str(r.get("date") or ""),
-            str(r.get("start_time") or ""),
-            str(r.get("imsi") or ""),
-            str(r.get("msisdn") or ""),
-            str(r.get("imei") or ""),
-            str(r.get("source_ip") or ""),
-            str(r.get("dest_ip") or ""),
-            str(r.get("dest_port") or ""),
-            str(r.get("cell_id") or ""),
+            str(r.get("session_date") or r.get("date") or ""),
+            str(r.get("session_start_time") or r.get("start_time") or r.get("time") or ""),
+            str(r.get("subscriber_imsi") or r.get("imsi") or ""),
+            str(r.get("subscriber_msisdn") or r.get("msisdn") or r.get("phone") or ""),
+            str(r.get("device_imei") or r.get("imei") or ""),
+            str(r.get("source_ip_address") or r.get("source_ip") or r.get("src_ip") or ""),
+            str(r.get("destination_ip_address") or r.get("dest_ip") or r.get("destination_ip") or r.get("dst_ip") or ""),
+            str(r.get("destination_port") or r.get("dest_port") or r.get("dst_port") or r.get("port") or ""),
+            str(r.get("cell_global_id") or r.get("cell_id") or ""),
             dur,
         ]
 

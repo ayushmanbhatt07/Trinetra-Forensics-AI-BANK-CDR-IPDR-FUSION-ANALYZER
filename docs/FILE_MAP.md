@@ -10,7 +10,7 @@ Every tracked source file in the repository, organized by layer.
 | `api.py` | API routes: ingest, summary, accounts, phones, graphs, hybrid, risk, scoring/alerts (with `explain_plain`), fused data, reports, dossiers, `/evaluate` |
 | `auth.py` | JWT auth + `AuthContext` for every protected route |
 | `store.py` | SQLite persistence (`backend/data/backend.db`), session/lab storage |
-| `config.py` | Env-based config: API keys, app dir, model names, fallback Groq keys |
+| `config.py` | Env-based config: API keys, app dir, model names, fallback OpenRouter keys |
 | `errors.py` | Typed API exceptions + handlers |
 | `log.py` | Structured logging (ingest/flag/report events) |
 | `schema.py` | Canonical dataclasses: transactions, CDR, IPDR, complaints, entities |
@@ -66,8 +66,8 @@ Every tracked source file in the repository, organized by layer.
 | `retrieval.py` | RAG evidence retrieval from the loaded SQLite bundle |
 | `db_builder.py` | In-memory SQLite bundle (bank/cdr/ipdr tables, indexes) |
 | `graph_engine.py` | 3-hop mule-chain graph traces (bank↔CDR↔IPDR) |
-| `prompts.py` | Groq prompt templates (EN) with Hindi/Gujarati instructions |
-| `llm_client.py` | LLM transport: Groq primary, deterministic fallback |
+| `prompts.py` | OpenRouter prompt templates (EN) with Hindi/Gujarati instructions |
+| `llm_client.py` | LLM transport: OpenRouter primary, deterministic fallback |
 | `memory.py` | Per-user investigation memory for follow-up questions |
 
 ## Frontend (`frontend/`)

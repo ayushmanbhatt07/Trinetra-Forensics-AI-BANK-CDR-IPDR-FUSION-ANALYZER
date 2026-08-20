@@ -49,7 +49,7 @@ The FastAPI backend exposes endpoints used by the Next.js investigation workspac
 ## 5. Investigative Copilot
 
 ### `POST /api/copilot/query`
-- **Purpose**: Submits a natural language query to the Groq-powered RAG system.
+- **Purpose**: Submits a natural language query to the OpenRouter-powered RAG system.
 - **Parameters**: `{ "query": "Show all transfers from account X to Y", "language": "en" }`
 - **Response**: `{ "answer": "...", "evidence_used": [...], "sql_trace": "..." }`
 

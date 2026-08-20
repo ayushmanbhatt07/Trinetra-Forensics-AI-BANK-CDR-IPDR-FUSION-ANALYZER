@@ -34,17 +34,39 @@ class CopilotGraphEngine:
             r_acc = str(r["receiver_account_number"]) if r["receiver_account_number"] else None
             
             if s_acc:
-                self.graph.add_node(s_acc, type="account", name=r.get("sender_customer_name"), phone=r.get("sender_phone_number"))
+                s_name = r.get("sender_customer_name")
                 s_phone = str(r["sender_phone_number"]) if r.get("sender_phone_number") else None
+                if s_acc not in self.graph:
+                    self.graph.add_node(s_acc, type="account", name=s_name, phone=s_phone)
+                else:
+                    if s_name and not self.graph.nodes[s_acc].get("name"):
+                        self.graph.nodes[s_acc]["name"] = s_name
+                    if s_phone and not self.graph.nodes[s_acc].get("phone"):
+                        self.graph.nodes[s_acc]["phone"] = s_phone
+
                 if s_phone and s_phone.strip() and s_phone != "nan":
-                    self.graph.add_node(s_phone, type="phone")
+                    if s_phone not in self.graph:
+                        self.graph.add_node(s_phone, type="phone", name=s_name)
+                    elif s_name and not self.graph.nodes[s_phone].get("name"):
+                        self.graph.nodes[s_phone]["name"] = s_name
                     self.graph.add_edge(s_acc, s_phone, edge_type="account_phone_link")
 
             if r_acc:
-                self.graph.add_node(r_acc, type="account", name=r.get("receiver_customer_name"), phone=r.get("receiver_phone_number"))
+                r_name = r.get("receiver_customer_name")
                 r_phone = str(r["receiver_phone_number"]) if r.get("receiver_phone_number") else None
+                if r_acc not in self.graph:
+                    self.graph.add_node(r_acc, type="account", name=r_name, phone=r_phone)
+                else:
+                    if r_name and not self.graph.nodes[r_acc].get("name"):
+                        self.graph.nodes[r_acc]["name"] = r_name
+                    if r_phone and not self.graph.nodes[r_acc].get("phone"):
+                        self.graph.nodes[r_acc]["phone"] = r_phone
+
                 if r_phone and r_phone.strip() and r_phone != "nan":
-                    self.graph.add_node(r_phone, type="phone")
+                    if r_phone not in self.graph:
+                        self.graph.add_node(r_phone, type="phone", name=r_name)
+                    elif r_name and not self.graph.nodes[r_phone].get("name"):
+                        self.graph.nodes[r_phone]["name"] = r_name
                     self.graph.add_edge(r_acc, r_phone, edge_type="account_phone_link")
 
             if s_acc and r_acc:
@@ -136,6 +158,35 @@ class CopilotGraphEngine:
         except Exception as e:
             logger.warning(f"Failed to add IMEI edges: {e}")
 
+        # 6. Enrich phone subscriber names from subscribers table
+        try:
+            cursor.execute("SELECT phone, name FROM subscribers WHERE name IS NOT NULL AND name != ''")
+            for sub_row in cursor.fetchall():
+                ph = str(sub_row["phone"]).strip()
+                nm = str(sub_row["name"]).strip()
+                if ph and nm and ph in self.graph and not self.graph.nodes[ph].get("name"):
+                    self.graph.nodes[ph]["name"] = nm
+        except Exception as e:
+            logger.warning(f"Failed to enrich subscriber names: {e}")
+
+        # 7. Fallback: ensure all bank account nodes have non-null customer names
+        try:
+            cursor.execute("SELECT sender_account_number, sender_customer_name FROM bank_transactions WHERE sender_customer_name IS NOT NULL AND sender_customer_name != ''")
+            for r_s in cursor.fetchall():
+                acc = str(r_s["sender_account_number"]).strip()
+                nm = str(r_s["sender_customer_name"]).strip()
+                if acc in self.graph and not self.graph.nodes[acc].get("name"):
+                    self.graph.nodes[acc]["name"] = nm
+
+            cursor.execute("SELECT receiver_account_number, receiver_customer_name FROM bank_transactions WHERE receiver_customer_name IS NOT NULL AND receiver_customer_name != ''")
+            for r_r in cursor.fetchall():
+                acc = str(r_r["receiver_account_number"]).strip()
+                nm = str(r_r["receiver_customer_name"]).strip()
+                if acc in self.graph and not self.graph.nodes[acc].get("name"):
+                    self.graph.nodes[acc]["name"] = nm
+        except Exception as e:
+            logger.warning(f"Failed fallback name enrichment: {e}")
+
         logger.info(f"Copilot Graph constructed with {self.graph.number_of_nodes()} nodes and {self.graph.number_of_edges()} edges.")
 
     def trace_mule_chain(self, start_entity_id: str, max_hops: int = 3) -> Dict[str, Any]:
@@ -145,27 +196,52 @@ class CopilotGraphEngine:
         # 1. Resolve Transaction ID -> Account Node
         if start_node not in self.graph:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT receiver_account_number, sender_account_number FROM bank_transactions WHERE transaction_id = ?", (start_node,))
+            cursor.execute(
+                "SELECT receiver_account_number, sender_account_number "
+                "FROM bank_transactions "
+                "WHERE LOWER(transaction_id) = LOWER(?) OR transaction_id LIKE ? LIMIT 1",
+                (start_node, f"%{start_node}%")
+            )
             row_tx = cursor.fetchone()
             if row_tx:
                 rec_acc = str(row_tx["receiver_account_number"]) if row_tx["receiver_account_number"] else None
                 send_acc = str(row_tx["sender_account_number"]) if row_tx["sender_account_number"] else None
-                start_node = rec_acc or send_acc or start_node
+                if send_acc and send_acc in self.graph:
+                    start_node = send_acc
+                elif rec_acc and rec_acc in self.graph:
+                    start_node = rec_acc
+                else:
+                    start_node = send_acc or rec_acc or start_node
 
         # 2. Resolve CDR ID -> Phone Node
         if start_node not in self.graph:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT a_party_number, b_party_number FROM cdr_records WHERE cdr_id = ?", (start_node,))
+            cursor.execute(
+                "SELECT a_party_number, b_party_number "
+                "FROM cdr_records "
+                "WHERE LOWER(cdr_id) = LOWER(?) OR cdr_id LIKE ? LIMIT 1",
+                (start_node, f"%{start_node}%")
+            )
             row_cdr = cursor.fetchone()
             if row_cdr:
                 a_num = str(row_cdr["a_party_number"]) if row_cdr["a_party_number"] else None
                 b_num = str(row_cdr["b_party_number"]) if row_cdr["b_party_number"] else None
-                start_node = a_num or b_num or start_node
+                if a_num and a_num in self.graph:
+                    start_node = a_num
+                elif b_num and b_num in self.graph:
+                    start_node = b_num
+                else:
+                    start_node = a_num or b_num or start_node
 
         # 3. Resolve IPDR ID -> MSISDN Node
         if start_node not in self.graph:
             cursor = self.conn.cursor()
-            cursor.execute("SELECT subscriber_msisdn FROM ipdr_records WHERE ipdr_id = ?", (start_node,))
+            cursor.execute(
+                "SELECT subscriber_msisdn "
+                "FROM ipdr_records "
+                "WHERE LOWER(ipdr_id) = LOWER(?) OR ipdr_id LIKE ? LIMIT 1",
+                (start_node, f"%{start_node}%")
+            )
             row_ipdr = cursor.fetchone()
             if row_ipdr and row_ipdr["subscriber_msisdn"]:
                 start_node = str(row_ipdr["subscriber_msisdn"])
@@ -380,6 +456,7 @@ class CopilotGraphEngine:
             "max_hops": max_hops,
             "total_nodes": trace.get("total_nodes", 0),
             "total_edges": trace.get("total_edges", 0),
-            "layers": out_layers,
+            "nodes": trace.get("nodes", []),
             "edges": trace.get("edges", []),
+            "layers": out_layers,
         }

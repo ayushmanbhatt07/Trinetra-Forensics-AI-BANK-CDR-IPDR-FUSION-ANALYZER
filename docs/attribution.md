@@ -26,7 +26,7 @@ All proprietary logic related to the forensic analysis is custom-built by the te
 * **`D3.js`**: Powers the unified timeline visualizations.
 
 ## 3. Third-Party Services & APIs
-* **Groq API**: The Investigative Copilot relies on the Groq inference engine for high-speed, natural language processing using open-weight models (e.g., LLaMA-3). Groq provides the raw text generation; the grounding context and prompt engineering are handled entirely by our backend.
+* **OpenRouter API**: The Investigative Copilot relies on the OpenRouter inference engine for high-speed, natural language processing using open-weight models (e.g., NVIDIA Nemotron). OpenRouter provides the raw text generation; the grounding context and prompt engineering are handled entirely by our backend.
 
 ## 4. Datasets
 The datasets included in the `data/` directory (if any) are strictly synthetic or heavily anonymized open-source samples used purely for demonstration and evaluator testing. **No real Personally Identifiable Information (PII) or sensitive financial data is included in this repository.**

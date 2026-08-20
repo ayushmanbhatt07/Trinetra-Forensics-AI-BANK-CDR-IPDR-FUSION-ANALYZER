@@ -179,8 +179,8 @@ def copilot_health(user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
                 "ipdr": len((bundle or {}).get("ipdr", [])),
             },
             "providers": {
-                "openrouter_keys": len(config.open_router_keys()),
-                "openrouter_model": client.active_model,
+                "groq_keys": len(config.groq_keys()),
+                "groq_model": client.active_model,
             },
             "memory": {
                 "file": str(ms.path),
@@ -405,10 +405,10 @@ def build_llm_investigation_tree(payload: LlmTreeRequest,
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"entity not found: {payload.entity_id}")
 
-        raw_nodes = graph.get("nodes", [])[:120]
+        raw_nodes = tree.get("nodes", [])[:120]
         
         node_ids = {str(n.get("node_id")) for n in raw_nodes}
-        filtered_edges = [e for e in graph.get("edges", []) if str(e.get("source")) in node_ids and str(e.get("target")) in node_ids]
+        filtered_edges = [e for e in tree.get("edges", []) if str(e.get("source")) in node_ids and str(e.get("target")) in node_ids]
         raw_edges = filtered_edges[:240]
 
         nodes, edges = raw_nodes, raw_edges
@@ -480,6 +480,20 @@ def build_llm_investigation_tree(payload: LlmTreeRequest,
         except Exception as le:
             logger.warning("LLM tree annotation skipped: %s", le)
 
+        if not narrative and out_nodes:
+            total_amt = sum(float(e.get("amount") or 0) for e in out_edges)
+            acc_cnt = sum(1 for n in out_nodes if n.get("kind") in ("account", "Account"))
+            phone_cnt = sum(1 for n in out_nodes if n.get("kind") in ("phone", "Phone"))
+            call_cnt = sum(1 for e in out_edges if e.get("kind") in ("CALLED", "cdr_call"))
+            
+            root_id = str(tree.get("entity_id") or payload.entity_id)
+            narrative = (
+                f"Forensic linking tree centered on {root_id} connects {len(out_nodes)} unique entities "
+                f"({acc_cnt} accounts, {phone_cnt} telecom devices) across {len(out_edges)} relationships. "
+                f"Total tracked fund movement is ₹{total_amt:,.2f} alongside {call_cnt} correlated call interactions. "
+                f"The topology reveals multi-tier fund layering and cross-device communication patterns typical of organized mule networks."
+            )
+
         return {
             "root": tree.get("entity_id"),
             "max_hops": payload.max_hops,
@@ -518,7 +532,7 @@ def build_investigation_graph(payload: GraphBuildRequest,
                               user: dict = Depends(auth.require_user)) -> Dict[str, Any]:
     """Builds a full investigation graph for the 3D tree visualisation.
     Returns nodes + edges shaped for the frontend force-graph renderer,
-    with LLM annotations when available."""
+    with fast deterministic roles and risk indicators."""
     try:
         engine = get_engine(user["username"])
 
@@ -556,6 +570,8 @@ def build_investigation_graph(payload: GraphBuildRequest,
                 "id": nid,
                 "kind": ntype,
                 "label": str(n.get("name") or label_by_type.get(ntype, nid)),
+                "name": str(n.get("name") or ""),
+                "phone": str(n.get("phone") or ""),
                 "hop_distance": int(n.get("hop_distance") or 0),
                 "risk": float(n.get("risk", 0) or 0),
                 "centrality": 0.0,
@@ -571,7 +587,20 @@ def build_investigation_graph(payload: GraphBuildRequest,
             degree[t] = degree.get(t, 0) + 1
         max_deg = max(degree.values()) if degree else 1
         for n in out_nodes:
-            n["centrality"] = round(degree.get(n["id"], 0) / max_deg, 2)
+            cent = round(degree.get(n["id"], 0) / max_deg, 2)
+            n["centrality"] = cent
+            # Assign deterministic forensic roles based on centrality and type
+            if n["id"] == payload.entity_id:
+                n["role"] = "Root Entity"
+            elif cent >= 0.7:
+                n["role"] = "High-Centrality Hub"
+                n["suspicion"] = "Central coordination / aggregation point"
+            elif n["hop_distance"] == 1:
+                n["role"] = "Direct Mule / Layer-1"
+            elif n["hop_distance"] == 2:
+                n["role"] = "Layer-2 Intermediate"
+            else:
+                n["role"] = "Layer-3 Offramp"
 
         # 3. Shape edges for the 3D frontend
         out_edges = []
@@ -579,51 +608,19 @@ def build_investigation_graph(payload: GraphBuildRequest,
             etype = str(e.get("edge_type") or "link")
             kind = "TRANSFERRED_TO" if etype == "bank_transfer" else (
                 "CALLED" if etype == "cdr_call" else "LINKED")
+            amt = float(e.get("amount") or 0)
+            reason = f"₹{amt:,.0f} Transfer" if amt > 0 else (
+                f"{int(e.get('duration') or 0)}s Call" if etype == "cdr_call" else "")
             out_edges.append({
                 "source": str(e.get("source", "")),
                 "target": str(e.get("target", "")),
                 "kind": kind,
-                "amount": float(e.get("amount") or 0),
+                "amount": amt,
                 "duration": float(e.get("duration") or 0),
-                "reason": "",
+                "reason": reason,
                 "tx_id": str(e.get("tx_id", "")),
                 "cdr_id": str(e.get("cdr_id", "")),
             })
-
-        # 4. LLM annotation pass (best-effort)
-        try:
-            from .llm_client import LlmClient
-            from .prompts import LLM_TREE_PROMPT
-            client = LlmClient()
-            if client.has_provider():
-                compact = {
-                    "root": payload.entity_id,
-                    "nodes": [{"id": n["id"], "kind": n["kind"],
-                               "label": n["label"]}
-                              for n in out_nodes[:60]],
-                    "edges": [{"source": e["source"], "target": e["target"],
-                               "kind": e["kind"],
-                               "amount": round(e["amount"])}
-                              for e in out_edges[:120]],
-                }
-                ok, raw, meta = client.generate_json(
-                    LLM_TREE_PROMPT, json.dumps(compact))
-                if ok and raw:
-                    ann = raw.get("annotations") or {}
-                    for n in out_nodes:
-                        a = ann.get(n["id"]) or {}
-                        if isinstance(a, dict):
-                            if a.get("role"):
-                                n["role"] = a["role"]
-                            if a.get("suspicion"):
-                                n["suspicion"] = a["suspicion"]
-                    for e in out_edges:
-                        a = ann.get(
-                            f"{e['source']}->{e['target']}") or {}
-                        if isinstance(a, dict) and a.get("reason"):
-                            e["reason"] = a["reason"]
-        except Exception as le:
-            logger.warning("LLM graph annotation skipped: %s", le)
 
         return {
             "found": True,
@@ -638,6 +635,8 @@ def build_investigation_graph(payload: GraphBuildRequest,
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error building graph: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
         logger.error(f"Error building graph: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 

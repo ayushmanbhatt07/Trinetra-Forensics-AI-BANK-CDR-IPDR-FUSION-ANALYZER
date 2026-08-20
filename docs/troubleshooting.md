@@ -2,11 +2,11 @@
 
 ## 1. Copilot / LLM Issues
 **Symptom**: The AI Copilot returns an error, hangs indefinitely, or states it cannot connect.
-**Cause**: The Groq API key is missing, invalid, or rate-limited.
+**Cause**: The OpenRouter API key is missing, invalid, or rate-limited.
 **Solution**:
-1. Check `backend/.env` for a valid `GROQ_API_KEY_1` entry.
+1. Check `backend/.env` for a valid `OPEN_ROUTER_KEY_1` entry.
 2. Check the backend console output for `429 Too Many Requests`.
-3. If rate-limited, add a secondary key (`GROQ_API_KEY_2`) and restart the backend server (`uvicorn`). The system will automatically utilize the fallback.
+3. If rate-limited, add a secondary key (`OPEN_ROUTER_KEY_2`) and restart the backend server (`uvicorn`). The system will automatically utilize the fallback.
 
 ## 2. Parsing Failures
 **Symptom**: An uploaded file shows up in the `skipped` bin on the Ingestion dashboard.

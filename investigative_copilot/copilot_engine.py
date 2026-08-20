@@ -155,7 +155,19 @@ class InvestigativeCoPilotEngine:
 
     def __init__(self, conn: Optional[sqlite3.Connection] = None,
                  bundle: Optional[Dict[str, Any]] = None, username: str = "default"):
-        self.conn = conn if conn is not None else get_copilot_db(bundle, username=username)
+        if conn is not None:
+            self.conn = conn
+            try:
+                self.conn.row_factory = sqlite3.Row
+            except Exception:
+                pass
+        else:
+            self.conn = get_copilot_db(bundle=bundle, username=username)
+            try:
+                self.conn.row_factory = sqlite3.Row
+            except Exception:
+                pass
+
         self.graph_engine = CopilotGraphEngine(self.conn)
         self.dataset_source = copilot_db_source()
         self.llm = LlmClient()
@@ -191,35 +203,58 @@ class InvestigativeCoPilotEngine:
             if len(query_clean.split()) <= 8:
                 is_factual = True
 
-        # 2. Try the live LLM (Groq) whenever a key exists
+        # 2. Try the live LLM (OpenRouter) whenever a key exists
         # Semantic queries use LLM, but simple queries skip it (is_factual=True).
         llm_response = None
         if self.llm.has_provider() and not is_factual:
-            llm_response = self._call_llm_api(query_clean)
+            try:
+                llm_response = self._call_llm_api(query_clean)
+            except Exception as e:
+                logger.warning(f"LLM call raised error: {e}")
+                llm_response = None
 
         # 3. If no LLM response or offline mode, run deterministic CoT pipeline
         if not llm_response:
-            llm_response = self._run_deterministic_pipeline(query_clean)
-            llm_response["mode"] = "deterministic"
-            llm_response["llm_provider"] = self._last_llm_meta.get("provider", "")
-            llm_response["llm_model"] = self._last_llm_meta.get("model", "")
-            llm_response["llm_latency_ms"] = self._last_llm_meta.get("latency_ms", 0)
-            self._remember(llm_response, query_clean)
+            try:
+                llm_response = self._run_deterministic_pipeline(query_clean)
+                llm_response["mode"] = "deterministic"
+                llm_response["llm_provider"] = self._last_llm_meta.get("provider", "")
+                llm_response["llm_model"] = self._last_llm_meta.get("model", "")
+                llm_response["llm_latency_ms"] = self._last_llm_meta.get("latency_ms", 0)
+                self._remember(llm_response, query_clean)
+            except Exception as e:
+                logger.error(f"Deterministic pipeline failed: {e}")
+                llm_response = {
+                    "query": query_clean,
+                    "intent": query_clean,
+                    "generated_sql": "",
+                    "execution_success": False,
+                    "row_count": 0,
+                    "records": [],
+                    "chain_of_thought": [],
+                    "executive_summary": f"Could not process query '{query_clean}'. Please try refining your query.",
+                    "answer": f"Could not process query '{query_clean}'. Please try refining your query.",
+                    "mode": "fallback"
+                }
 
-        # 3. Attach the retrieved evidence to every envelope (any mode).
+        # 4. Attach the retrieved evidence to every envelope (any mode).
         llm_response.setdefault("retrieved_evidence", self._retrieved[:8])
         llm_response.setdefault("answer", llm_response.get("executive_summary") or "")
-        # 4. Plain-English explainability companion (always deterministic).
+        
+        # 5. Plain-English explainability companion (always deterministic).
         if not llm_response.get("explainability"):
             try:
                 from backend.explain import plain_explainability
                 llm_response["explainability"] = plain_explainability(
                     llm_response, query_clean)
-            except Exception as e:  # noqa: BLE001 — explainability is best-effort
+            except Exception as e:
                 logger.debug("explainability skipped: %s", e)
                 llm_response["explainability"] = ""
         
-        return self._make_serializable(llm_response)
+        try:
+            return self._make_serializable(llm_response)
+        except Exception:
+            return llm_response
 
     def _make_serializable(self, obj: Any) -> Any:
         """Deeply convert all non-native types (Decimal, datetime, numpy, NaN, sets) to JSON-safe builtins."""
@@ -930,13 +965,18 @@ class InvestigativeCoPilotEngine:
                 tx_ids = [r.get("transaction_id") for r in annotated if r.get("transaction_id")]
                 reasons_text = []
                 if tx_ids:
-                    in_clause = ",".join(f"'{x}'" for x in tx_ids)
-                    cursor = self.conn.cursor()
-                    cursor.execute(f"SELECT transaction_id, scenario_type FROM anomaly_records WHERE transaction_id IN ({in_clause}) AND is_suspicious = 1")
-                    from backend.explain import _lookup
-                    for row in cursor.fetchall():
-                        if row["scenario_type"]:
-                            reasons_text.append(f"Transaction {row['transaction_id']}: {_lookup(row['scenario_type'])}.")
+                    try:
+                        in_clause = ",".join(f"'{x}'" for x in tx_ids)
+                        cursor = self.conn.cursor()
+                        cursor.execute(f"SELECT transaction_id, scenario_type FROM anomaly_records WHERE transaction_id IN ({in_clause}) AND is_suspicious = 1")
+                        from backend.explain import _lookup
+                        for row in cursor.fetchall():
+                            stype = row["scenario_type"] if (isinstance(row, sqlite3.Row) or isinstance(row, dict)) else row[1]
+                            tx_id = row["transaction_id"] if (isinstance(row, sqlite3.Row) or isinstance(row, dict)) else row[0]
+                            if stype:
+                                reasons_text.append(f"Transaction {tx_id}: {_lookup(str(stype))}.")
+                    except Exception as e:
+                        logger.debug("Anomaly lookup in _finalize skipped: %s", e)
                 
                 if reasons_text:
                     envelope["risk_summary"] = "This activity is classified as highly suspicious (Risk Score > 85). " + " ".join(reasons_text)
@@ -988,7 +1028,7 @@ class InvestigativeCoPilotEngine:
             logger.warning(f"Failed to update copilot memory: {e}")
 
     def _call_llm_api(self, user_query: str) -> Optional[Dict[str, Any]]:
-        """Calls the live LLM (Groq).
+        """Calls the live LLM (OpenRouter).
 
         Returns an envelope with ``mode``:
           * "sql"      — model generated SQL, executed against the copilot DB
