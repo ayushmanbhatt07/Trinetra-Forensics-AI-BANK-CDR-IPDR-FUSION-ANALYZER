@@ -168,6 +168,28 @@ def load_bundle(username: str) -> dict | None:
     return out
 
 
+def load_richest_bundle() -> tuple[str | None, dict | None]:
+    """Find the bundle across all users that contains the most forensic data."""
+    with _lock:
+        conn = _connect()
+        try:
+            users = [r[0] for r in conn.execute("SELECT DISTINCT username FROM bundle").fetchall()]
+        finally:
+            conn.close()
+    best_user = None
+    best_bundle = None
+    best_count = 0
+    for u in users:
+        b = load_bundle(u)
+        if b:
+            cnt = len(b.get("bank", [])) + len(b.get("cdr", [])) + len(b.get("ipdr", []))
+            if cnt > best_count:
+                best_count = cnt
+                best_user = u
+                best_bundle = b
+    return best_user, best_bundle
+
+
 def clear_bundle(username: str) -> None:
     """Drop all persisted bundle tables and pipeline jobs from SQLite for a user."""
     with _lock:

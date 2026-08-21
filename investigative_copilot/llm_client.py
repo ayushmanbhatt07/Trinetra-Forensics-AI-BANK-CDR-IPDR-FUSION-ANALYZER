@@ -19,26 +19,108 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+import threading
 
 from backend import config
 
 logger = logging.getLogger(__name__)
 
-# Primary model: fastest at 1000 tok/s, 1000 RPM, 250K TPM on Groq Developer Plan
+# Primary model: High-throughput 250K TPM model (never rate-limited on large prompts)
 GROQ_MODEL = "openai/gpt-oss-20b"
 
-# Fallback chain — ordered by speed/availability
+# Fallback chain — ordered by high throughput capacity & speed
 FALLBACK_MODELS = [
-    "openai/gpt-oss-20b",           # 1000 tok/s, 1000 RPM, 250K TPM
-    "openai/gpt-oss-120b",          # 500 tok/s,  1000 RPM, 250K TPM
-    "qwen/qwen3-32b",               # High quality reasoning, 1000 RPM
-    "meta-llama/llama-4-scout-17b-16e-instruct",  # Fast, 30 TPM free
-    "meta-llama/llama-4-maverick-17b-128e-instruct",  # Capable fallback
-    "llama-3.3-70b-versatile",      # Legacy high-quality fallback
-    "mixtral-8x7b-32768",           # Broad coverage fallback
+    "openai/gpt-oss-20b",           # Primary (250K TPM, 0.44s)
+    "openai/gpt-oss-120b",          # High-capacity 120B (250K TPM, 0.48s)
+    "qwen/qwen3.6-27b",             # Qwen Reasoning (8K TPM, 0.23s)
+    "groq/compound-mini",           # Compound Mini (0.80s)
+    "groq/compound",                # Compound Full (1.74s)
 ]
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+class TokenTracker:
+    """Mathematical token tracking engine for Groq LLMs."""
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.last_prompt_tokens: int = 0
+        self.last_completion_tokens: int = 0
+        self.last_total_tokens: int = 0
+        self._window_records: List[Tuple[float, int]] = []
+        self.active_model: str = GROQ_MODEL
+        self.groq_header_remaining_tokens: Optional[int] = None
+        self.groq_header_limit_tokens: Optional[int] = None
+
+    def record_usage(self, prompt_tokens: int, completion_tokens: int, model: str,
+                     header_remaining: Optional[int] = None, header_limit: Optional[int] = None) -> None:
+        now = time.time()
+        total = prompt_tokens + completion_tokens
+        with self._lock:
+            self.last_prompt_tokens = prompt_tokens
+            self.last_completion_tokens = completion_tokens
+            self.last_total_tokens = total
+            self.active_model = model
+            if header_remaining is not None:
+                self.groq_header_remaining_tokens = header_remaining
+            if header_limit is not None:
+                self.groq_header_limit_tokens = header_limit
+            self._window_records.append((now, total))
+            self._window_records = [(t, tok) for t, tok in self._window_records if now - t <= 60.0]
+
+    def get_stats(self) -> Dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            self._window_records = [(t, tok) for t, tok in self._window_records if now - t <= 60.0]
+            used_last_min = sum(tok for _, tok in self._window_records)
+            
+            keys = config.groq_keys()
+            num_keys = max(1, len(keys))
+            
+            model = (self.active_model or GROQ_MODEL).lower()
+            if "20b" in model or "120b" in model:
+                base_tpm = 250000
+            elif "70b" in model:
+                base_tpm = 30000
+            elif "qwen" in model:
+                base_tpm = 15000
+            else:
+                base_tpm = 30000
+
+            total_tpm_capacity = base_tpm * num_keys
+
+            if self.groq_header_remaining_tokens is not None and self.groq_header_remaining_tokens > 0:
+                remaining_tpm = self.groq_header_remaining_tokens * num_keys
+            else:
+                remaining_tpm = max(0, total_tpm_capacity - used_last_min)
+
+            pct_remaining = round((remaining_tpm / max(1, total_tpm_capacity)) * 100, 1)
+            pct_remaining = min(100.0, max(0.0, pct_remaining))
+
+            return {
+                "active_model": self.active_model,
+                "active_keys_count": num_keys,
+                "base_tpm_limit": base_tpm,
+                "total_tpm_capacity": total_tpm_capacity,
+                "used_last_minute": used_last_min,
+                "remaining_tpm": remaining_tpm,
+                "pct_remaining": pct_remaining,
+                "last_query": {
+                    "prompt_tokens": self.last_prompt_tokens,
+                    "completion_tokens": self.last_completion_tokens,
+                    "total_tokens": self.last_total_tokens,
+                }
+            }
+
+
+token_tracker = TokenTracker()
+
+def _mask_key(key: str) -> str:
+    if not key:
+        return "NO_KEY"
+    if len(key) > 8:
+        return f"{key[:4]}...{key[-4:]}"
+    return "gsk_****"
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -68,33 +150,21 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     if start == -1:
         return None
     depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(stripped)):
-        ch = stripped[i]
-        if esc:
-            esc = False
-            continue
-        if ch == "\\":
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
+    for idx in range(start, len(stripped)):
+        ch = stripped[idx]
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
             if depth == 0:
+                candidate = stripped[start:idx + 1]
                 try:
-                    obj = json.loads(stripped[start:i + 1])
-                    if isinstance(obj, dict):
-                        return obj
+                    res = json.loads(candidate)
+                    if isinstance(res, dict):
+                        return res
                 except Exception:
                     pass
-                return None
+                break
     return None
 
 
@@ -164,25 +234,46 @@ class LlmClient:
                 payload["response_format"] = {"type": "json_object"}
 
             for i, key in enumerate(keys):
-                ok, parsed, err = self._post_json(_GROQ_URL, payload, key,
-                                                  self.request_timeout)
+                key_masked = _mask_key(key)
+                logger.info(f"[Groq LLM Call] Calling model '{model}' with API Key {key_masked} (key #{i+1}/{len(keys)})...")
+                print(f"[KEY] [Groq LLM Call] Calling model '{model}' with API Key {key_masked} (key #{i+1}/{len(keys)})...", flush=True)
+
+                ok, parsed, err = self._post_json(_GROQ_URL, payload, key, self.request_timeout)
+                latency_sec = self.latency_ms / 1000.0
+
                 if ok:
                     self.active_model = model
+                    logger.info(f"[Groq LLM Success] API Key {key_masked} | Model '{model}' -> SUCCEEDED in {latency_sec:.2f}s")
+                    print(f"[SUCCESS] [Groq LLM Success] API Key {key_masked} | Model '{model}' -> SUCCEEDED in {latency_sec:.2f}s", flush=True)
                     return True, parsed, ""
+
                 last_err = f"model={model} key{i}: {err}"
+                logger.warning(f"[Groq LLM Error] API Key {key_masked} | Model '{model}' -> FAILED ({err})")
+                print(f"[ERROR] [Groq LLM Error] API Key {key_masked} | Model '{model}' -> FAILED ({err})", flush=True)
+
                 # Model-level errors → try next model immediately
                 if any(sig in err.lower() for sig in (
                     "decommission", "not_found", "404", "model_not_found",
                     "does not exist", "unsupported"
                 )):
-                    logger.warning("Groq model %s unavailable, trying fallback...", model)
+                    curr_idx = models_to_try.index(model)
+                    if curr_idx + 1 < len(models_to_try):
+                        next_model = models_to_try[curr_idx + 1]
+                        logger.warning(f"[Groq LLM Fallback] Model '{model}' unavailable. FALLING BACK to model '{next_model}'...")
+                        print(f"[FALLBACK] [Groq LLM Fallback] Model '{model}' unavailable. FALLING BACK to model '{next_model}'...", flush=True)
                     break
                 if "empty completion" in err or "no parseable json" in err.lower():
-                    logger.warning("Groq model %s bad response (%s), trying fallback...", model, err)
+                    curr_idx = models_to_try.index(model)
+                    if curr_idx + 1 < len(models_to_try):
+                        next_model = models_to_try[curr_idx + 1]
+                        logger.warning(f"[Groq LLM Fallback] Model '{model}' output error ({err}). FALLING BACK to model '{next_model}'...")
+                        print(f"[FALLBACK] [Groq LLM Fallback] Model '{model}' output error. FALLING BACK to model '{next_model}'...", flush=True)
                     break
                 # Key-level rate-limit → rotate key
                 if i < len(keys) - 1:
-                    logger.warning("Groq key %d failed (%s); rotating to next key", i, err)
+                    next_key_masked = _mask_key(keys[i + 1])
+                    logger.warning(f"[Groq LLM Key Rotation] Key {key_masked} failed. ROTATING to key #{i+2} ({next_key_masked})...")
+                    print(f"[ROTATION] [Groq LLM Key Rotation] Key {key_masked} failed. ROTATING to key #{i+2} ({next_key_masked})...", flush=True)
 
         return False, None, last_err
 
@@ -224,7 +315,27 @@ class LlmClient:
             finish_reason, len(content_val) if content_val else 0,
         )
 
+        # Extract Groq rate-limit headers & token usage
+        hdr_rem = resp.headers.get("x-ratelimit-remaining-tokens")
+        hdr_lim = resp.headers.get("x-ratelimit-limit-tokens")
+        rem_tok = int(hdr_rem) if hdr_rem and hdr_rem.isdigit() else None
+        lim_tok = int(hdr_lim) if hdr_lim and hdr_lim.isdigit() else None
+
+        usage = data.get("usage", {})
+        p_tokens = usage.get("prompt_tokens", 0)
+        c_tokens = usage.get("completion_tokens", 0)
+
         text = self._extract_text(data)
+        if not p_tokens and not c_tokens:
+            p_tokens = len(text) // 4 if text else 200
+            c_tokens = 150
+
+        token_tracker.record_usage(
+            p_tokens, c_tokens,
+            data.get("model") or payload.get("model") or self.active_model,
+            rem_tok, lim_tok
+        )
+
         if not text:
             return False, None, "empty completion"
         parsed = _extract_json(text)

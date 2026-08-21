@@ -155,7 +155,8 @@ def account_analysis(bank: list[dict], complaints: list[dict]) -> dict:
     return out
 
 
-def correlate_phones(bundle: dict, window_sec: int = BANK_TXN_WINDOW_SEC) -> dict:
+def correlate_phones(bundle: dict, window_sec: int = BANK_TXN_WINDOW_SEC,
+                     limit: int = 100) -> dict:
     """Link bank counterparty phones to CDR activity.
 
     For every phone recovered from a bank narration that is also a CDR
@@ -208,6 +209,8 @@ def correlate_phones(bundle: dict, window_sec: int = BANK_TXN_WINDOW_SEC) -> dic
             "window_count": len(window),
         })
     hits.sort(key=lambda h: (h["phone"], h["txn_ts"] or 0))
+    if limit and limit > 0:
+        hits = hits[:limit]
     return {"hits": hits, "window_sec": window_sec}
 
 

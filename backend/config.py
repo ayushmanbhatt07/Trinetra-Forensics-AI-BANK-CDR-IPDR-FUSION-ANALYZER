@@ -70,13 +70,23 @@ def _float(key: str, default: float) -> float:
 
 
 def data_dir() -> Path:
-    d = Path(_get("DATA_DIR")).expanduser().resolve()
+    raw = _get("DATA_DIR")
+    if not os.path.isabs(raw):
+        base = Path(__file__).resolve().parent
+        d = (base / raw).expanduser().resolve()
+    else:
+        d = Path(raw).expanduser().resolve()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def case_dir() -> Path:
-    d = Path(_get("CASE_DIR")).expanduser().resolve()
+    raw = _get("CASE_DIR")
+    if not os.path.isabs(raw):
+        base = Path(__file__).resolve().parent
+        d = (base / raw).expanduser().resolve()
+    else:
+        d = Path(raw).expanduser().resolve()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

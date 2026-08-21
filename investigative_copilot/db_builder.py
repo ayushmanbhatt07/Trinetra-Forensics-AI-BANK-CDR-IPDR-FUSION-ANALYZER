@@ -181,13 +181,21 @@ class CopilotDBBuilder:
 
     @staticmethod
     def _bank_row(r: dict) -> list:
-        txn_type = str(r.get("txn_type") or "D").upper()
-        amount = r.get("transaction_amount")
+        txn_type = str(r.get("txn_type") or r.get("type") or "D").upper()
+        amount = None
+        for k in ["transaction_amount", "amount", "debit", "credit", "withdrawal", "deposit", "txn_amount", "total_amount"]:
+            v = r.get(k)
+            if v is not None and v != "":
+                try:
+                    fv = float(v)
+                    if fv != 0.0:
+                        amount = fv
+                        break
+                    elif amount is None:
+                        amount = 0.0
+                except (TypeError, ValueError):
+                    pass
         if amount is None:
-            amount = (r.get("credit") if txn_type == "C" else r.get("debit")) or 0
-        try:
-            amount = float(amount)
-        except (TypeError, ValueError):
             amount = 0.0
         date = str(r.get("date") or "")
         time_ = str(r.get("time") or "")
@@ -212,9 +220,9 @@ class CopilotDBBuilder:
         elif not r_acc and acc_no:
             r_acc = acc_no
 
-        s_name = str(r.get("sender_customer_name") or r.get("sender_name") or r.get("account_name") or "")
-        r_name = str(r.get("receiver_customer_name") or r.get("receiver_name") or r.get("counterparty_name") or "")
-        s_phone = _norm_phone(r.get("sender_phone_number") or r.get("sender_phone") or "")
+        s_name = str(r.get("sender_customer_name") or r.get("sender_name") or r.get("customer_name") or r.get("account_name") or "")
+        r_name = str(r.get("receiver_customer_name") or r.get("receiver_name") or r.get("counterparty_name") or r.get("beneficiary_name") or "")
+        s_phone = _norm_phone(r.get("sender_phone_number") or r.get("sender_phone") or r.get("phone") or "")
         r_phone = _norm_phone(r.get("receiver_phone_number") or r.get("receiver_phone") or "")
         s_bank = str(r.get("sender_bank_name") or r.get("sender_bank") or r.get("bank") or "")
         r_bank = str(r.get("receiver_bank_name") or r.get("receiver_bank") or r.get("counterparty_bank") or "")
@@ -223,7 +231,7 @@ class CopilotDBBuilder:
             str(r.get("txn_id") or r.get("transaction_id") or ""),
             date,
             timestamp,
-            str(r.get("txn_ref_number") or r.get("narration") or ""),
+            str(r.get("txn_ref_number") or r.get("narration") or r.get("description") or ""),
             str(r.get("mode") or r.get("transaction_mode") or ""),
             str(r.get("currency") or "INR"),
             amount,
@@ -518,7 +526,17 @@ def get_copilot_db(bundle: Optional[Dict[str, Any]] = None,
     """
     global _global_db_conns, _global_db_source
     if username in _global_db_conns:
-        return _global_db_conns[username]
+        conn = _global_db_conns[username]
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM bank_transactions;")
+            cnt = cur.fetchone()[0]
+            if cnt > 0 or bundle is None or len(bundle.get("bank", [])) == 0:
+                return conn
+            _global_db_conns.pop(username, None)
+        except Exception:
+            _global_db_conns.pop(username, None)
+
     if bundle is not None:
         builder = CopilotDBBuilder()
         _global_db_conns[username] = builder.build_database_from_bundle(bundle)

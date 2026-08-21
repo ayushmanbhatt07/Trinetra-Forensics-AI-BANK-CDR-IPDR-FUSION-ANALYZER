@@ -152,37 +152,81 @@ def _safe_amount(r: dict[str, Any]) -> float:
 
 
 def plain_explainability(envelope: dict[str, Any], query: str = "") -> str:
-    """Deterministic plain-English explainability block for co-pilot answers.
+    """Intelligent plain-English explainability block for co-pilot answers."""
+    risk_sum = envelope.get("risk_summary") or ""
+    # If the LLM already provided a detailed, grounded forensic rationale, use it directly!
+    if risk_sum and len(risk_sum.strip()) > 30 and not risk_sum.startswith("According to the risk engine"):
+        return risk_sum.strip()
 
-    Uses whatever evidence/records the query returned so the LLM narrative
-    always has a grounded, human-readable companion summary.
-    """
     records = envelope.get("records") or []
     top = records[:5]
     parts: list[str] = []
 
-    if envelope.get("intent"):
-        parts.append(f"Query intent classified as '{envelope['intent']}'.")
-
     if top:
         leads = []
+        max_score = 0.0
+        critical_evidence = []
+        
         for r in top:
             txn = r.get("transaction_id") or r.get("txn_id") or ""
             acc = (r.get("receiver_account_number") or r.get("sender_account_number")
                    or r.get("account_no") or r.get("receiver_account") or "")
             amt_val = _safe_amount(r)
-            who = f"account {acc}" if acc else (txn or "a record")
-            amt = f" of ₹{amt_val:,.0f}" if amt_val > 0 else ""
-            mode = r.get("transaction_mode") or ""
+            who = f"Account {acc}" if acc else (f"Transaction {txn}" if txn else "Record")
+            amt = f"Transfer of ₹{amt_val:,.2f}" if amt_val > 0 else "Transaction"
+            mode = r.get("transaction_mode") or r.get("mode") or ""
             mode_txt = f" via {mode}" if mode else ""
-            leads.append(f"{who} shows a transfer{amt}{mode_txt}"
-                         + (f" ({txn})" if txn else ""))
-        parts.append("Top evidence:\n" + "\n".join(f"- {lead}" for lead in leads))
+            
+            # Extract anomaly score
+            score = float(r.get("risk_score") or r.get("composite_score") or 0.0)
+            if score > max_score:
+                max_score = score
+            
+            reasons = []
+            # 1. Check if record contains rule breakdown from risk engine
+            if isinstance(r.get("breakdown"), list) and r["breakdown"]:
+                for b in r["breakdown"]:
+                    if isinstance(b, dict) and b.get("reason"):
+                        reasons.append(b["reason"])
+                    elif isinstance(b, dict) and b.get("rule"):
+                        reasons.append(_lookup(b["rule"]))
+            elif r.get("rules_fired"):
+                rules = r["rules_fired"]
+                if isinstance(rules, str):
+                    rules = [x.strip() for x in rules.replace("[", "").replace("]", "").replace("'", "").split(",") if x.strip()]
+                for rf in rules:
+                    reasons.append(_lookup(rf))
+            
+            # 2. Extract evidence strings (e.g. [CDR] 6 calls <= 60 min)
+            if isinstance(r.get("evidence"), list):
+                for ev in r["evidence"]:
+                    if ev and ev not in critical_evidence:
+                        critical_evidence.append(str(ev))
+            
+            # 3. Check value and mode threshold heuristics if no rules fired
+            if not reasons:
+                if amt_val >= 500000:
+                    reasons.append("High-Value Transfer Exceeding ₹5,00,000")
+                elif amt_val >= 90000:
+                    reasons.append("Regulatory Reporting Threshold Proximity (₹1,00,000)")
+                if "CASH" in str(mode).upper():
+                    reasons.append("Cash Channel / Source Anonymity Risk")
+                elif "UPI" in str(mode).upper() and amt_val >= 50000:
+                    reasons.append("Rapid Velocity Retail Channel")
+                
+            reason_str = f" — *{'; '.join(reasons[:2])}*" if reasons else ""
+            score_badge = f" [Risk: {score:.0f}/100]" if score > 0 else ""
+            leads.append(f"• **{who}**: {amt}{mode_txt}{score_badge}{reason_str}")
+            
+        parts.append("**Forensic Evidence Breakdown:**\n" + "\n".join(leads))
+        if critical_evidence:
+            parts.append("**Telecom & Linkage Evidence:**\n" + "\n".join(f"• {ev}" for ev in critical_evidence[:3]))
 
-    if envelope.get("risk_summary") or envelope.get("executive_summary"):
-        parts.append("\nThe overall risk assessment is that this pattern deserves "
-                     "investigator review — see the narrative above for details.")
+    if risk_sum and not risk_sum.startswith("According to the risk engine"):
+        parts.append(f"**Risk Assessment:** {risk_sum}")
+    elif max_score >= 70:
+        parts.append(f"**Risk Assessment:** Critical/High-risk anomaly pattern flagged (Risk Score: {max_score:.0f}/100). Exhibits behavioral deviations and telecom coordination.")
+    elif len(records) > 0:
+        parts.append("**Risk Assessment:** Activity exhibits high transaction value or volume velocity requiring active forensic verification.")
 
-    if not parts:
-        return ""
-    return " ".join(parts)
+    return "\n\n".join(parts) if parts else "No critical anomalies detected for this entity."

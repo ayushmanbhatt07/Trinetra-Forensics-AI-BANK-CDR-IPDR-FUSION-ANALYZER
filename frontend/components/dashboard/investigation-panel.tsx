@@ -62,12 +62,24 @@ function Section({ title, children, icon: Icon }: { title: string; children: Rea
 function Kpi({ label, value, accent }: { label: string; value: string | number | undefined | boolean; accent?: string }) {
   const displayValue = typeof value === 'boolean' ? (value ? 'Yes' : 'No') : (value ?? "—");
   return (
-    <div className="rounded-lg border border-border bg-secondary/30 px-4 py-3">
-      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
-      <p className={`font-mono text-sm font-semibold truncate ${accent ?? "text-foreground"}`} title={String(displayValue)}>{displayValue}</p>
+    <div className="rounded-xl border border-border/60 bg-secondary/30 px-3.5 py-3 min-w-0 shadow-sm">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground truncate">{label}</p>
+      <p className={`font-mono text-sm font-semibold break-words select-all leading-snug mt-0.5 ${accent ?? "text-foreground"}`} title={String(displayValue)}>{displayValue}</p>
     </div>
   );
 }
+
+const markdownComponents = {
+  p: ({ children }: any) => <p className="text-sm text-foreground/90 leading-relaxed mb-2.5">{children}</p>,
+  ul: ({ children }: any) => <ul className="space-y-2.5 my-3 pl-1">{children}</ul>,
+  ol: ({ children }: any) => <ol className="space-y-2.5 my-3 pl-1">{children}</ol>,
+  li: ({ children }: any) => (
+    <li className="flex items-start gap-3 text-sm text-slate-100 leading-relaxed bg-card/70 p-3.5 rounded-xl border border-border/60 shadow-sm">
+      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 mt-1.5 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+      <span className="flex-1 font-sans">{children}</span>
+    </li>
+  ),
+};
 
 export function InvestigationPanel({
   data,
@@ -103,7 +115,7 @@ export function InvestigationPanel({
       <DialogContent 
         showCloseButton={false}
         onInteractOutside={() => onClose()}
-        className="max-w-[95vw] w-[1400px] max-h-[95vh] overflow-hidden flex flex-col p-0 gap-0 bg-background border border-border/60 shadow-2xl"
+        className="w-[94vw] max-w-[1400px] sm:max-w-[94vw] lg:max-w-[1400px] max-h-[92vh] overflow-hidden flex flex-col p-0 gap-0 bg-background border border-border/60 shadow-2xl"
       >
         
         {/* Header */}
@@ -227,15 +239,16 @@ export function InvestigationPanel({
                     {/* 6. AI Investigation Summary */}
                     {dossier.ai?.investigation_summary && dossier.ai.investigation_summary.length > 0 && (
                       <Section title="Point-wise AI Investigation Summary" icon={BrainCircuit}>
-                        <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-5 space-y-4">
-                          {dossier.ai.investigation_summary.map((point, i) => (
-                            <div key={i} className="flex items-start gap-3">
-                              <span className="flex-none flex items-center justify-center w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-500 font-mono text-xs font-bold mt-0.5">
-                                {i + 1}
-                              </span>
-                              <p className="text-sm text-foreground/90 leading-relaxed">{point}</p>
-                            </div>
-                          ))}
+                        <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4 space-y-3">
+                          {dossier.ai.investigation_summary.map((point, i) => {
+                            const cleanPoint = point.replace(/^\d+[\.\)]\s*/, '');
+                            return (
+                              <div key={i} className="flex items-start gap-3.5 bg-card/70 border border-border/70 rounded-xl p-4 shadow-sm hover:border-emerald-500/40 transition-colors">
+                                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 mt-1.5 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+                                <p className="text-sm text-slate-100 leading-relaxed flex-1 font-sans">{cleanPoint}</p>
+                              </div>
+                            );
+                          })}
                         </div>
                       </Section>
                     )}
@@ -243,13 +256,16 @@ export function InvestigationPanel({
                     {/* 14. Actionable Recommendations */}
                     {dossier.ai?.recommendations && dossier.ai.recommendations.length > 0 && (
                       <Section title="Investigation Recommendations" icon={ShieldAlert}>
-                        <div className="grid grid-cols-1 gap-2">
-                          {dossier.ai.recommendations.map((rec, i) => (
-                            <div key={i} className="flex items-center gap-3 bg-secondary/10 border border-border rounded-lg p-3">
-                              <span className="font-mono text-xs text-muted-foreground w-4">{i + 1}.</span>
-                              <span className="text-sm">{rec}</span>
-                            </div>
-                          ))}
+                        <div className="space-y-3">
+                          {dossier.ai.recommendations.map((rec, i) => {
+                            const cleanRec = rec.replace(/^\d+[\.\)]\s*/, '');
+                            return (
+                              <div key={i} className="flex items-start gap-3.5 bg-card/70 border border-border/70 rounded-xl p-4 shadow-sm hover:border-amber-500/40 transition-colors">
+                                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0 mt-1.5 shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+                                <p className="text-sm text-slate-100 leading-relaxed flex-1 font-sans">{cleanRec}</p>
+                              </div>
+                            );
+                          })}
                         </div>
                       </Section>
                     )}
@@ -260,7 +276,7 @@ export function InvestigationPanel({
                     {dossier.ai?.money_flow_summary && (
                       <Section title="Money Flow Summary" icon={Network}>
                         <div className="bg-secondary/20 border border-border rounded-xl p-5 text-sm text-foreground/80 leading-relaxed font-mono">
-                          <ReactMarkdown>{dossier.ai.money_flow_summary}</ReactMarkdown>
+                          <ReactMarkdown components={markdownComponents}>{dossier.ai.money_flow_summary}</ReactMarkdown>
                         </div>
                         {dossier.ai.flow_stats && (
                           <div className="grid grid-cols-3 gap-2 mt-3">

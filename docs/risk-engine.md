@@ -1,27 +1,54 @@
-# Risk & Anomaly Engine
+# Risk & Anomaly Detection Engine
 
-Tri-Netra Forensics employs a multi-stage Risk Engine (`backend/risk/`) to automatically flag suspicious activity without requiring manual analyst queries. It combines deterministic rules with unsupervised machine learning.
+Tri-Netra Forensics employs a multi-stage, hybrid Risk Engine (`backend/risk/`) to automatically flag money laundering, mule rings, and behavioral anomalies without requiring manual analyst searching.
 
-## 1. Deterministic Rule Engine (`scenarios.py`)
+---
 
-The rule engine executes rigid, logic-based checks against the fused dataset. It contains 22 predefined laundering and mule-account scenarios.
+## 1. 11-Model Machine Learning Ensemble (`backend/risk/ensemble.py`)
 
-### Key Scenarios Supported:
-* **Rapid In-and-Out**: Funds arrive in an account and >90% are withdrawn or transferred to a secondary account within 10 minutes.
-* **Structuring (Smurfing)**: Multiple small deposits just below the reporting threshold (e.g., ₹49,000) over a short period.
-* **Layering**: A rapid chain of transfers across 3 or more accounts ($A \to B \to C \to D$).
-* **Odd-Hour Activity**: High-volume transactions occurring between 1:00 AM and 4:00 AM local time.
-* **Circular Flow**: Funds originate at Account A, pass through intermediary accounts, and return to Account A (detected via Graph Intelligence).
+To eliminate single-point-of-failure heuristic rules, the platform deploys a concurrent **11-model hybrid ensemble**:
 
-## 2. Machine Learning Anomaly Detection (`ensemble.py`)
+### 🔵 Unsupervised Detectors (7 Models — Cold Start / Unlabeled Data)
+All unsupervised detectors evaluate normalized feature matrices in real-time:
+1. **Isolation Forest** (`sklearn.ensemble`): Isolates structural outliers across multidimensional transaction volumes and velocity spaces.
+2. **Local Outlier Factor (LOF)** (`sklearn.neighbors`): Measures local density variations against peer account distributions.
+3. **DBSCAN** (`sklearn.cluster`): Identifies dense normal clusters and isolates irregular noise points.
+4. **HDBSCAN** (`hdbscan`): Hierarchical density clustering capable of adapting to varying dataset distributions.
+5. **One-Class SVM** (`sklearn.svm`): RBF-kernel margin outlier detection for nonlinear transaction boundaries.
+6. **PCA Reconstruction Error** (`sklearn.decomposition`): Flags accounts with high reconstruction loss in the principal subspace.
+7. **Z-Score Baseline** (`numpy`): Extreme-value statistical thresholding for transaction volumes and burst rates.
 
-Deterministic rules can be evaded by careful criminals. The ML engine establishes behavioral baselines and flags statistical deviations.
+### 🟠 Supervised Ground-Truth Detectors (4 Models — Active Benchmarking)
+Fitted dynamically when evaluating against ground-truth validation splits:
+1. **Random Forest Classifier** (`sklearn.ensemble`): Non-linear decision tree voting over 20+ forensic account features.
+2. **XGBoost** (`xgboost`): Gradient-boosted decision trees optimized for sparse financial indicators.
+3. **LightGBM** (`lightgbm`): Fast histogram-based gradient boosting.
+4. **CatBoost** (`catboost`): High-accuracy categorical handling for telecom carrier and IFSC features.
 
-### Ensemble Approach
-* **Isolation Forest**: Used to isolate extreme outliers in transaction velocity (count per hour) and volume (amount distribution). It assigns an anomaly score from 0 to 1 to every entity.
-* **Local Outlier Factor (LOF)**: Measures local density deviations, identifying accounts that behave drastically differently from their immediate network peers.
+---
 
-## 3. Risk Scoring & Aggregation
-The Risk Engine aggregates signals from both the rules and the ML models to produce a final `risk_score` (0.0 to 1.0) for every entity.
-- Base score + (Rule weight * triggers) + (ML anomaly score * weight).
-Entities exceeding a defined threshold (e.g., 0.75) are surfaced to the top of the investigator's Anomaly Feed.
+## 2. Deterministic Scenario Typology Classifier (`backend/risk/scenarios.py`)
+
+Translates mathematical anomaly scores into the language of legal and financial investigators:
+- **Rapid In-and-Out**: Funds deposited and >90% withdrawn/transferred within 10 minutes (mule signature).
+- **Structuring / Smurfing**: High-frequency transactions deliberately sized just below statutory reporting thresholds (e.g. ₹49,000).
+- **Layering**: Funds transferred across $\ge 3$ intermediate accounts in rapid succession ($A \to B \to C \to D$).
+- **Circular Flow**: Funds originating from Account A pass through intermediary nodes and return to Account A.
+- **Call-Assisted Fraud**: Voice or SMS communications immediately preceding a high-value transfer.
+- **Shared Device Fraud**: Multiple distinct bank accounts accessed via the same IMEI, IMSI, or IP address.
+- **SIM Swap / Device Change**: Cellular IMSI/IMEI identifiers changing shortly before high-value withdrawals.
+- **Dormant Account Activation**: Long-inactive bank accounts suddenly experiencing high-velocity credit inflows.
+
+---
+
+## 3. Hybrid Risk Composite Scoring (`backend/risk/hybrid.py`)
+
+Computes a calibrated 0–100 risk score with per-component explainability:
+$$\text{Composite Score} = w_{\text{rules}} S_{\text{rules}} + w_{\text{ML}} S_{\text{ML}} + w_{\text{beh}} S_{\text{beh}} + w_{\text{temp}} S_{\text{temp}} + w_{\text{tel}} S_{\text{tel}} + w_{\text{net}} S_{\text{net}}$$
+
+- **Banding**:
+  - `CRITICAL`: Score $\ge 75$ (Immediate priority alert)
+  - `HIGH`: Score $50 - 74$ (Elevated risk)
+  - `MEDIUM`: Score $25 - 49$ (Monitoring required)
+  - `LOW`: Score $< 25$ (Normal baseline)
+- **Explainability**: Every alert includes concrete forensic reasons, model components, and evidence pointers.

@@ -18,7 +18,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Database, Search, Download, ShieldAlert,
-  FileText, X, Activity, AlertTriangle, Check, Copy, PhoneCall, Loader2, Clock
+  FileText, X, Activity, AlertTriangle, Check, Copy, PhoneCall, Loader2, Clock, Network
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -429,8 +429,8 @@ export const FusedSection = React.memo(function FusedSection() {
                     <AlertTriangle className="size-5 text-red-500" />
                     <p className="font-mono text-sm font-semibold">{selectedRow.transaction_id}</p>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {selectedRow.account_no} · {selectedRow.bank}
+                  <p className="mt-1 text-xs font-medium text-emerald-400">
+                    {selectedRow.account_name ? `${selectedRow.account_name} (${selectedRow.account_no})` : selectedRow.account_no} · {selectedRow.bank || "Bank"}
                   </p>
                 </div>
                 <div className="flex items-center gap-1">
@@ -463,6 +463,61 @@ export const FusedSection = React.memo(function FusedSection() {
                     <p className="mt-1 text-lg font-black" style={{ color: s.color }}>{s.value}</p>
                   </div>
                 ))}
+              </div>
+
+              {/* ── Entity & Transfer Cycle Details ────────────────────────────────────── */}
+              <div className="mx-5 mb-3 rounded-xl border border-border/80 bg-muted/20 p-4 space-y-3">
+                <div className="flex items-center justify-between border-b border-border/60 pb-2">
+                  <p className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                    <Network className="size-3.5" /> Entity & Transaction Flow Cycle
+                  </p>
+                  {selectedRow.mode && (
+                    <Badge variant="outline" className="border-cyan-500/40 bg-cyan-500/10 text-cyan-300 font-mono text-[10px]">
+                      {selectedRow.mode}
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Sender / Source Entity */}
+                  <div className="rounded-lg border border-slate-700/60 bg-slate-900/60 p-3 space-y-1">
+                    <p className="text-[10px] uppercase font-bold text-slate-400">From (Sender Entity)</p>
+                    <p className="text-sm font-semibold text-slate-100 break-all">
+                      {selectedRow.account_name || "Sender Customer"}
+                    </p>
+                    <div className="text-xs text-slate-400 font-mono space-y-0.5 pt-1">
+                      <p>Acc: <span className="text-slate-200">{selectedRow.account_no || "N/A"}</span></p>
+                      <p>Phone: <span className="text-cyan-300">{selectedRow.sender_phone || "Not linked"}</span></p>
+                      {selectedRow.bank && <p>Bank: <span className="text-slate-300">{selectedRow.bank}</span></p>}
+                    </div>
+                  </div>
+
+                  {/* Receiver / Cycle Destination Entity */}
+                  <div className="rounded-lg border border-slate-700/60 bg-slate-900/60 p-3 space-y-1">
+                    <p className="text-[10px] uppercase font-bold text-amber-400">To (Sent Cycle Destination)</p>
+                    <p className="text-sm font-semibold text-slate-100 break-all">
+                      {selectedRow.counterparty_name || "Destination Account"}
+                    </p>
+                    <div className="text-xs text-slate-400 font-mono space-y-0.5 pt-1">
+                      <p>Acc: <span className="text-slate-200">{selectedRow.receiver_account || selectedRow.counterparty_name || "N/A"}</span></p>
+                      <p>Phone: <span className="text-cyan-300">{selectedRow.receiver_phone || "Not linked"}</span></p>
+                      {selectedRow.counterparty_bank && <p>Bank: <span className="text-slate-300">{selectedRow.counterparty_bank}</span></p>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Connected Phone Numbers Banner */}
+                {(selectedRow.sender_phone || selectedRow.receiver_phone || (selectedRow.linked_calls && selectedRow.linked_calls.length > 0)) && (
+                  <div className="flex items-center gap-2 rounded-lg border border-cyan-500/20 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-300">
+                    <PhoneCall className="size-3.5 shrink-0 text-cyan-400" />
+                    <span>
+                      Connected Phone Links:{" "}
+                      <strong className="font-mono text-cyan-200">
+                        {[selectedRow.sender_phone, selectedRow.receiver_phone, ...(selectedRow.linked_calls || []).map((c: any) => c.phone)].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(" ↔ ")}
+                      </strong>
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* plain-English why */}

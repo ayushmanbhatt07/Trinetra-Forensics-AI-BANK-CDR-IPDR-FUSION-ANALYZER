@@ -13,7 +13,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   ShieldAlert, FileText, X, Activity, Database,
-  Download, AlertTriangle, Check, Copy, PhoneCall, Loader2, Clock, Search
+  Download, AlertTriangle, Check, Copy, PhoneCall, Loader2, Clock, Search, Network
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -81,6 +81,58 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
   const [fetchKey, setFetchKey] = useState(0);
 
   const { isAnomaliesReady, loading: pipelineLoading, pipeline } = usePipeline();
+
+  // Calculate multi-selection risk heatmap analytics
+  const selectedAlertsList = React.useMemo(() => {
+    return alerts.filter(a => selectedRows.has(a.transaction_id));
+  }, [alerts, selectedRows]);
+
+  const heatmapData = React.useMemo(() => {
+    if (selectedAlertsList.length === 0) return { hourly: [], banks: [], totalVol: 0, maxRisk: 0 };
+
+    const hourBins = Array.from({ length: 24 }, (_, h) => ({ hour: h, count: 0, maxRisk: 0, vol: 0 }));
+    const bankSet = new Set<string>();
+    let totalVol = 0;
+    let maxRisk = 0;
+
+    selectedAlertsList.forEach(a => {
+      const amt = Number(a.amount_usd) || 0;
+      const risk = Number(a.risk_score) || 0;
+      totalVol += amt;
+      if (risk > maxRisk) maxRisk = risk;
+
+      if (a.bank) bankSet.add(a.bank);
+      if ((a as any).counterparty_bank) bankSet.add((a as any).counterparty_bank);
+
+      let hour = 12;
+      if (a.time) {
+        const parts = a.time.split(":");
+        if (parts.length > 0 && !isNaN(parseInt(parts[0]))) {
+          hour = parseInt(parts[0], 10) % 24;
+        }
+      }
+      hourBins[hour].count += 1;
+      hourBins[hour].vol += amt;
+      if (risk > hourBins[hour].maxRisk) hourBins[hour].maxRisk = risk;
+    });
+
+    return {
+      hourly: hourBins,
+      banks: Array.from(bankSet),
+      totalVol,
+      maxRisk
+    };
+  }, [selectedAlertsList]);
+
+  const handleInspectSelectedNetwork = () => {
+    const selectedIds = Array.from(selectedRows);
+    try {
+      sessionStorage.setItem("network_selected_entities", JSON.stringify(selectedIds));
+    } catch (e) {}
+    window.dispatchEvent(new CustomEvent("nav:network_filter", { detail: { selectedIds } }));
+    window.dispatchEvent(new CustomEvent("nav:section", { detail: "network" }));
+    toast.success(`Opening cross-bank network graph for ${selectedIds.length} selected transactions.`);
+  };
 
   // Clear cache whenever dataset_id changes
   useEffect(() => {
@@ -385,33 +437,84 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
 
         {selectedRows.size > 0 && (
           <div className="border-t border-border bg-muted/20 p-4 h-64 shrink-0 flex gap-4">
-            <div className="flex-1 rounded-xl border border-border bg-card/60 p-4 flex flex-col justify-center items-center text-center">
-              <Activity className="size-8 text-violet-400 mb-2 opacity-80" />
-              <h4 className="font-semibold text-sm text-foreground/90">Multi-Transaction Heatmap</h4>
-              <p className="text-xs text-muted-foreground mt-1 max-w-xs">
-                {selectedRows.size} transactions selected. The density heatmap visualizes chronological concentration and frequency outliers.
-              </p>
-              <div className="mt-4 flex flex-wrap justify-center gap-1">
-                {Array.from({ length: 28 }).map((_, i) => (
-                  <div key={i} className="size-3 rounded-sm bg-violet-500/20" style={{ opacity: 0.3 + (i % 5) * 0.15 }} />
-                ))}
+            {/* Multi-Transaction Risk Heatmap */}
+            <div className="flex-1 rounded-xl border border-border bg-slate-950/80 p-4 flex flex-col justify-between shadow-xl">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Activity className="size-4 text-violet-400" />
+                  <h4 className="font-semibold text-xs font-mono text-foreground uppercase tracking-wider">
+                    Cross-Bank 24-Hour Risk Density Heatmap
+                  </h4>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-[10px] border-violet-500/40 text-violet-300 bg-violet-950/30 font-mono">
+                    {selectedRows.size} Selected
+                  </Badge>
+                  <Badge variant="outline" className="text-[10px] border-rose-500/40 text-rose-400 bg-rose-950/30 font-mono">
+                    Peak Risk: {heatmapData.maxRisk.toFixed(1)}
+                  </Badge>
+                </div>
+              </div>
+
+              {/* Hourly Heatmap Grid (24 Hours) */}
+              <div className="my-2 space-y-1">
+                <div className="grid grid-cols-24 gap-1 h-16 items-end bg-slate-900/80 p-2 rounded-lg border border-slate-800">
+                  {heatmapData.hourly.map((bin) => {
+                    const heightPct = bin.count > 0 ? Math.max(25, Math.min(100, (bin.count / (selectedRows.size || 1)) * 300)) : 12;
+                    const bgClass = bin.maxRisk >= 70 ? "bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.6)] animate-pulse" 
+                      : bin.maxRisk >= 50 ? "bg-amber-400" 
+                      : bin.count > 0 ? "bg-cyan-500" 
+                      : "bg-slate-800/40";
+                    return (
+                      <div
+                        key={bin.hour}
+                        className="group relative flex flex-col justify-end h-full rounded-xs transition-all hover:scale-110 cursor-pointer"
+                      >
+                        <div
+                          className={`w-full rounded-xs transition-all ${bgClass}`}
+                          style={{ height: `${heightPct}%` }}
+                        />
+                        {/* Hover Tooltip */}
+                        <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 hidden group-hover:flex flex-col items-center z-30 pointer-events-none">
+                          <div className="bg-slate-900 text-slate-100 text-[10px] font-mono px-2.5 py-1.5 rounded-md border border-slate-700 shadow-2xl whitespace-nowrap space-y-0.5">
+                            <div className="font-bold text-slate-200">Hour {String(bin.hour).padStart(2, '0')}:00</div>
+                            <div className="text-cyan-400">{bin.count} Txns (₹{Math.round(bin.vol).toLocaleString('en-IN')})</div>
+                            {bin.maxRisk > 0 && <div className="text-rose-400 font-bold">Max Risk: {bin.maxRisk.toFixed(1)}</div>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex justify-between text-[9px] font-mono text-slate-400 px-1">
+                  <span>00:00 (Midnight)</span>
+                  <span>06:00</span>
+                  <span>12:00 (Noon)</span>
+                  <span>18:00</span>
+                  <span>23:00</span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-muted-foreground font-mono">
+                <span>Selected Volume: <strong className="text-emerald-400 font-bold">₹{heatmapData.totalVol.toLocaleString('en-IN')}</strong></span>
+                <span>Channels: <strong className="text-cyan-300">{heatmapData.banks.slice(0, 3).join(" ↔ ") || "Multi-Bank"}</strong></span>
               </div>
             </div>
-            <div className="flex-1 rounded-xl border border-border bg-card/60 p-4 flex flex-col justify-center items-center text-center">
-              <Database className="size-8 text-cyan-400 mb-2 opacity-80" />
-              <h4 className="font-semibold text-sm text-foreground/90">Relationship Model</h4>
-              <p className="text-xs text-muted-foreground mt-1 max-w-xs">
-                Analyzing common counter-parties and shared IP/IMEI intersections across {selectedRows.size} selections.
+
+            {/* Relationship Model & Network Inspector */}
+            <div className="flex-1 rounded-xl border border-border bg-slate-950/80 p-4 flex flex-col justify-center items-center text-center shadow-xl">
+              <Database className="size-7 text-cyan-400 mb-2 opacity-90 animate-pulse" />
+              <h4 className="font-semibold text-xs font-mono text-foreground uppercase tracking-wider">Cross-Bank & Operator Sub-Graph</h4>
+              <p className="text-xs text-muted-foreground mt-1 max-w-xs font-mono">
+                Analyzing common counterparties, shared IP, and telecom intersections across {selectedRows.size} selected anomalies.
               </p>
               <Button
                 variant="outline"
                 size="sm"
-                className="mt-4 border-cyan-500/30 text-cyan-400 hover:bg-cyan-950/20"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("nav:section", { detail: "network" }));
-                }}
+                className="mt-3 border-cyan-500/40 bg-cyan-950/40 text-cyan-300 hover:bg-cyan-600 hover:text-white shadow-lg shadow-cyan-950/50 transition-all font-mono text-xs"
+                onClick={handleInspectSelectedNetwork}
               >
-                Inspect in Network Graph
+                <Network className="mr-1.5 size-3.5" /> Inspect in Network Graph
               </Button>
             </div>
           </div>
@@ -442,8 +545,8 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
                     <AlertTriangle className="size-5 text-red-500" />
                     <p className="font-mono text-sm font-semibold">{selectedAlert.transaction_id}</p>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {selectedAlert.sender_customer_id} · {selectedAlert.bank}
+                  <p className="mt-1 text-xs font-medium text-emerald-400">
+                    {selectedAlert.customer_name || selectedAlert.sender_name ? `${selectedAlert.customer_name || selectedAlert.sender_name} (${selectedAlert.sender_account || selectedAlert.account_no || selectedAlert.sender_customer_id})` : selectedAlert.sender_customer_id} · {selectedAlert.bank || "Bank"}
                   </p>
                 </div>
                 <div className="flex items-center gap-1">
@@ -476,6 +579,61 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
                     <p className="mt-1 text-lg font-black" style={{ color: s.color }}>{s.value}</p>
                   </div>
                 ))}
+              </div>
+
+              {/* ── Entity & Transfer Cycle Details ────────────────────────────────────── */}
+              <div className="mx-5 mb-3 rounded-xl border border-border/80 bg-muted/20 p-4 space-y-3">
+                <div className="flex items-center justify-between border-b border-border/60 pb-2">
+                  <p className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                    <Network className="size-3.5" /> Entity & Transaction Flow Cycle
+                  </p>
+                  {selectedAlert.mode && (
+                    <Badge variant="outline" className="border-cyan-500/40 bg-cyan-500/10 text-cyan-300 font-mono text-[10px]">
+                      {selectedAlert.mode}
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Sender / Source Entity */}
+                  <div className="rounded-lg border border-slate-700/60 bg-slate-900/60 p-3 space-y-1">
+                    <p className="text-[10px] uppercase font-bold text-slate-400">From (Sender Entity)</p>
+                    <p className="text-sm font-semibold text-slate-100 break-all">
+                      {selectedAlert.customer_name || selectedAlert.sender_name || "Sender Customer"}
+                    </p>
+                    <div className="text-xs text-slate-400 font-mono space-y-0.5 pt-1">
+                      <p>Acc: <span className="text-slate-200">{selectedAlert.account_no || selectedAlert.sender_account || selectedAlert.sender_customer_id || "N/A"}</span></p>
+                      <p>Phone: <span className="text-cyan-300">{selectedAlert.customer_phone || selectedAlert.sender_phone || "Not linked"}</span></p>
+                      {selectedAlert.bank && <p>Bank: <span className="text-slate-300">{selectedAlert.bank}</span></p>}
+                    </div>
+                  </div>
+
+                  {/* Receiver / Cycle Destination Entity */}
+                  <div className="rounded-lg border border-slate-700/60 bg-slate-900/60 p-3 space-y-1">
+                    <p className="text-[10px] uppercase font-bold text-amber-400">To (Sent Cycle Destination)</p>
+                    <p className="text-sm font-semibold text-slate-100 break-all">
+                      {selectedAlert.receiver_name || selectedAlert.counterparty_name || "Destination Account"}
+                    </p>
+                    <div className="text-xs text-slate-400 font-mono space-y-0.5 pt-1">
+                      <p>Acc: <span className="text-slate-200">{selectedAlert.receiver_account || selectedAlert.counterparty_name || "N/A"}</span></p>
+                      <p>Phone: <span className="text-cyan-300">{selectedAlert.receiver_phone || "Not linked"}</span></p>
+                      {selectedAlert.counterparty_bank && <p>Bank: <span className="text-slate-300">{selectedAlert.counterparty_bank}</span></p>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Connected Phone Numbers Banner */}
+                {(selectedAlert.customer_phone || selectedAlert.sender_phone || selectedAlert.receiver_phone) && (
+                  <div className="flex items-center gap-2 rounded-lg border border-cyan-500/20 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-300">
+                    <PhoneCall className="size-3.5 shrink-0 text-cyan-400" />
+                    <span>
+                      Connected Phone Links:{" "}
+                      <strong className="font-mono text-cyan-200">
+                        {[selectedAlert.customer_phone || selectedAlert.sender_phone, selectedAlert.receiver_phone].filter(Boolean).join(" ↔ ")}
+                      </strong>
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* plain-English why */}

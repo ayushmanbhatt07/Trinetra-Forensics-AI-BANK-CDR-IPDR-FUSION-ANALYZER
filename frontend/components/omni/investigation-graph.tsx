@@ -129,6 +129,111 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const [error, setError] = useState('');
 
+  // ── Legend Selection Checkboxes State ──────────────────────────────────
+  const [selectedNodeKinds, setSelectedNodeKinds] = useState<Set<string>>(
+    new Set(['account', 'phone', 'txn', 'imei', 'ip'])
+  );
+  const [selectedEdgeKinds, setSelectedEdgeKinds] = useState<Set<string>>(
+    new Set(['TRANSFERRED_TO', 'CALLED', 'LINKED'])
+  );
+  const [showOnlyAnomalous, setShowOnlyAnomalous] = useState(false);
+  const [showMasterOnly, setShowMasterOnly] = useState(false);
+
+  const toggleNodeKind = (kind: string) => {
+    setSelectedNodeKinds(prev => {
+      const next = new Set(prev);
+      if (next.has(kind)) {
+        next.delete(kind);
+      } else {
+        next.add(kind);
+        // Smart auto-enabling: if turning on 'account' or 'txn', ensure TRANSFERRED_TO is enabled
+        if (kind === 'account' || kind === 'txn') {
+          setSelectedEdgeKinds(edges => new Set(edges).add('TRANSFERRED_TO'));
+        } else if (kind === 'phone') {
+          setSelectedEdgeKinds(edges => new Set(edges).add('CALLED'));
+        }
+      }
+      return next;
+    });
+  };
+
+  const toggleEdgeKind = (kind: string) => {
+    setSelectedEdgeKinds(prev => {
+      const next = new Set(prev);
+      if (next.has(kind)) {
+        next.delete(kind);
+      } else {
+        next.add(kind);
+        // Smart auto-enabling nodes required by this edge connection type
+        if (kind === 'TRANSFERRED_TO') {
+          setSelectedNodeKinds(nodes => new Set(nodes).add('account').add('txn'));
+        } else if (kind === 'CALLED') {
+          setSelectedNodeKinds(nodes => new Set(nodes).add('phone'));
+        } else if (kind === 'LINKED') {
+          setSelectedNodeKinds(nodes => new Set(nodes).add('phone').add('imei').add('ip'));
+        }
+      }
+      return next;
+    });
+  };
+
+  const selectAllFilters = () => {
+    setSelectedNodeKinds(new Set(['account', 'phone', 'txn', 'imei', 'ip']));
+    setSelectedEdgeKinds(new Set(['TRANSFERRED_TO', 'CALLED', 'LINKED']));
+    setShowOnlyAnomalous(false);
+    setShowMasterOnly(false);
+  };
+
+  const filteredGraphData = useMemo(() => {
+    const rawNodes = graphData.nodes || [];
+    const rawLinks = graphData.links || [];
+
+    const filteredNodes = rawNodes.filter(n => {
+      const isRoot = entityId && String(n.id).trim().toLowerCase() === String(entityId).trim().toLowerCase();
+      if (isRoot) return true;
+
+      const kindMatch = selectedNodeKinds.has((n.kind || '').toLowerCase());
+      if (!kindMatch) return false;
+
+      if (showOnlyAnomalous) {
+        const isRed = (n.risk > 80) || (n.suspicion && typeof n.suspicion === 'string' && n.suspicion.toLowerCase() !== 'none' && n.suspicion.trim().length > 3);
+        if (!isRed) return false;
+      }
+
+      if (showMasterOnly) {
+        const isMaster = n.centrality > 0.5;
+        if (!isMaster) return false;
+      }
+
+      return true;
+    });
+
+    const activeNodeIds = new Set(filteredNodes.map(n => String(n.id)));
+
+    // Clean un-hydrated string IDs for source and target so ForceGraph3D re-simulates cleanly
+    const filteredLinks = rawLinks
+      .filter(e => {
+        const edgeKind = (e.kind || '').toUpperCase();
+        if (!selectedEdgeKinds.has(edgeKind)) return false;
+
+        const sId = typeof e.source === 'object' ? (e.source as any).id : String(e.source);
+        const tId = typeof e.target === 'object' ? (e.target as any).id : String(e.target);
+
+        return activeNodeIds.has(sId) && activeNodeIds.has(tId);
+      })
+      .map(e => ({
+        ...e,
+        source: typeof e.source === 'object' ? (e.source as any).id : String(e.source),
+        target: typeof e.target === 'object' ? (e.target as any).id : String(e.target),
+      }));
+
+    return { nodes: filteredNodes, links: filteredLinks };
+  }, [graphData, selectedNodeKinds, selectedEdgeKinds, showOnlyAnomalous, showMasterOnly, entityId]);
+
+  const filterKey = useMemo(() => {
+    return `${Array.from(selectedNodeKinds).sort().join('-')}_${Array.from(selectedEdgeKinds).sort().join('-')}_${showMasterOnly}_${showOnlyAnomalous}_${entityId}_${filteredGraphData.nodes.length}_${filteredGraphData.links.length}`;
+  }, [selectedNodeKinds, selectedEdgeKinds, showMasterOnly, showOnlyAnomalous, entityId, filteredGraphData]);
+
   const loadGraph = useCallback(async (eid?: string) => {
     const target = (eid || entityId || initialEntity).trim();
     if (!target) return;
@@ -227,9 +332,6 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
 
       setGraphData({ nodes, links });
       setEntityId(target); // Update state to the actual queried target so Amber coloring works
-
-      // Auto-focus camera removed as per user request to not auto-zoom to fit
-      // Users will manually zoom and rotate the LLM tree.
 
       // Generate insights
       try {
@@ -351,42 +453,123 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
         </Button>
       </div>
 
-      {/* ── legend ────────────────────────────────────────────────────── */}
-      <div className="absolute top-4 right-4 z-20 rounded-xl border border-slate-700/60 bg-slate-900/80 backdrop-blur-xl p-3 shadow-2xl">
-        <p className="text-[10px] font-mono uppercase tracking-widest text-slate-500 mb-2">Node Types</p>
-        <div className="space-y-1">
-          {Object.entries(NODE_COLORS).filter(([k]) => k !== 'unknown').map(([k, c]) => (
-            <div key={k} className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full" style={{ background: c }} />
-              <span className="text-[11px] text-slate-400 capitalize">{k}</span>
-            </div>
-          ))}
-        </div>
-        
-        <p className="text-[10px] font-mono uppercase tracking-widest text-slate-500 mt-3 mb-2">Flags</p>
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full shadow-[0_0_8px_rgba(251,191,36,0.8)]" style={{ background: '#fbbf24' }} />
-            <span className="text-[11px] text-amber-400 font-medium">Master Node</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full shadow-[0_0_8px_rgba(239,68,68,0.8)]" style={{ background: '#ef4444' }} />
-            <span className="text-[11px] text-red-400 font-medium">Anomalous</span>
-          </div>
+      {/* ── legend with interactive selection checkboxes ───────────────────────── */}
+      <div className="absolute top-4 right-4 z-20 rounded-xl border border-slate-700/70 bg-slate-900/90 backdrop-blur-xl p-3 shadow-2xl w-60 text-slate-200 select-none">
+        <div className="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-2">
+          <p className="text-[10px] font-mono uppercase tracking-widest text-cyan-400 font-semibold">
+            Legend & Filter
+          </p>
+          <button
+            onClick={selectAllFilters}
+            className="text-[10px] text-cyan-400 hover:text-cyan-200 underline font-mono transition-colors"
+          >
+            Reset All
+          </button>
         </div>
 
-        <p className="text-[10px] font-mono uppercase tracking-widest text-slate-500 mt-3 mb-2">Edges</p>
-        <div className="space-y-1">
-          {Object.entries(EDGE_COLORS).map(([k, c]) => (
-            <div key={k} className="flex items-center gap-2">
-              <span className="w-4 h-[2px] rounded" style={{ background: c }} />
-              <span className="text-[11px] text-slate-400">{k.replace(/_/g, ' ')}</span>
-            </div>
-          ))}
+        {/* NODE TYPES CHECKBOXES */}
+        <p className="text-[10px] font-mono uppercase tracking-widest text-slate-400 mb-1.5 font-medium">
+          Node Types
+        </p>
+        <div className="space-y-1 mb-3">
+          {Object.entries(NODE_COLORS).filter(([k]) => k !== 'unknown').map(([k, c]) => {
+            const isChecked = selectedNodeKinds.has(k);
+            return (
+              <label
+                key={k}
+                className="flex items-center justify-between gap-2 px-1.5 py-0.5 rounded hover:bg-slate-800/60 cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: c }} />
+                  <span className={`text-[11px] capitalize ${isChecked ? 'text-slate-200 font-medium' : 'text-slate-500 line-through'}`}>
+                    {k}
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={() => toggleNodeKind(k)}
+                  className="rounded border-slate-700 bg-slate-800 text-cyan-500 focus:ring-0 size-3.5 cursor-pointer accent-cyan-500"
+                />
+              </label>
+            );
+          })}
         </div>
+
+        {/* FLAGS CHECKBOXES */}
+        <p className="text-[10px] font-mono uppercase tracking-widest text-slate-400 mb-1.5 font-medium">
+          Flags
+        </p>
+        <div className="space-y-1 mb-3">
+          <label className="flex items-center justify-between gap-2 px-1.5 py-0.5 rounded hover:bg-slate-800/60 cursor-pointer transition-colors">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full shadow-[0_0_8px_rgba(251,191,36,0.8)] shrink-0" style={{ background: '#fbbf24' }} />
+              <span className={`text-[11px] ${showMasterOnly ? 'text-amber-300 font-semibold' : 'text-amber-400/80'}`}>
+                Master Hubs Only
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              checked={showMasterOnly}
+              onChange={(e) => setShowMasterOnly(e.target.checked)}
+              className="rounded border-slate-700 bg-slate-800 text-amber-500 focus:ring-0 size-3.5 cursor-pointer accent-amber-500"
+            />
+          </label>
+          <label className="flex items-center justify-between gap-2 px-1.5 py-0.5 rounded hover:bg-slate-800/60 cursor-pointer transition-colors">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full shadow-[0_0_8px_rgba(239,68,68,0.8)] shrink-0" style={{ background: '#ef4444' }} />
+              <span className={`text-[11px] ${showOnlyAnomalous ? 'text-rose-300 font-semibold' : 'text-red-400/80'}`}>
+                Anomalous Only
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              checked={showOnlyAnomalous}
+              onChange={(e) => setShowOnlyAnomalous(e.target.checked)}
+              className="rounded border-slate-700 bg-slate-800 text-rose-500 focus:ring-0 size-3.5 cursor-pointer accent-rose-500"
+            />
+          </label>
+        </div>
+
+        {/* EDGES CHECKBOXES */}
+        <p className="text-[10px] font-mono uppercase tracking-widest text-slate-400 mb-1.5 font-medium">
+          Edge Connections
+        </p>
+        <div className="space-y-1">
+          {Object.entries(EDGE_COLORS).map(([k, c]) => {
+            const isChecked = selectedEdgeKinds.has(k);
+            return (
+              <label
+                key={k}
+                className="flex items-center justify-between gap-2 px-1.5 py-0.5 rounded hover:bg-slate-800/60 cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-4 h-[2.5px] rounded shrink-0" style={{ background: c }} />
+                  <span className={`text-[11px] ${isChecked ? 'text-slate-200 font-medium' : 'text-slate-500 line-through'}`}>
+                    {k.replace(/_/g, ' ')}
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={() => toggleEdgeKind(k)}
+                  className="rounded border-slate-700 bg-slate-800 text-cyan-500 focus:ring-0 size-3.5 cursor-pointer accent-cyan-500"
+                />
+              </label>
+            );
+          })}
+        </div>
+
         {graphData.nodes.length > 0 && (
-          <div className="mt-3 pt-2 border-t border-slate-700/50">
-            <p className="text-[10px] text-cyan-400 font-mono">{graphData.nodes.length} nodes · {graphData.links.length} edges</p>
+          <div className="mt-3 pt-2 border-t border-slate-700/50 flex items-center justify-between">
+            <p className="text-[10px] text-cyan-400 font-mono font-medium">
+              {filteredGraphData.nodes.length} nodes · {filteredGraphData.links.length} edges
+            </p>
+            {filteredGraphData.nodes.length !== graphData.nodes.length && (
+              <span className="text-[9px] text-amber-400 font-mono">
+                (Filtered)
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -413,8 +596,9 @@ export function InvestigationGraph({ initialEntity = '' }: { initialEntity?: str
       {/* ── 3D force graph ────────────────────────────────────────────── */}
       {graphData.nodes.length > 0 && (
         <ForceGraph3D
+          key={filterKey}
           ref={fgRef}
-          graphData={graphData}
+          graphData={filteredGraphData}
           nodeId="id"
           nodeLabel={nodeLabel}
           nodeColor={nodeColor}

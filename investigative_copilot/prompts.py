@@ -62,6 +62,13 @@ OUTPUT CONTRACT — reply with a single JSON object, no prose around it:
 RULES:
 0. RAG GROUNDING: A "RETRIEVED CORPUS CONTEXT" block in the user content lists actual rows from the uploaded dataset. Use them to infer valid table values or entities.
 1. If the question is answerable from the schema above, ALWAYS return sql_query. Prefer JOINs against bank_cdr_links (bank+CDR correlation) and cdr_ipdr_links (CDR+IPDR correlation); time windows must use ABS(bcl.time_difference_seconds) <= seconds.
+1.1 ENTITY & KEYWORD SEARCHES: When the query is a person name, company, account number, or keyword (e.g. 'Kaushik Joshi', 'Axis', 'Crypto', 'ATM'), search across sender_customer_name, receiver_customer_name, txn_ref_number, sender_account_number, receiver_account_number using LIKE '%term%'.
+1.2 FORENSIC ANALYTICAL TEMPLATES:
+- "Who is the most suspicious entity?" / "Top suspicious accounts" / "highest risk" -> SELECT bt.transaction_id, bt.timestamp, bt.transaction_amount, bt.transaction_mode, bt.sender_customer_name, bt.sender_account_number, bt.receiver_customer_name, bt.receiver_account_number FROM bank_transactions bt ORDER BY bt.transaction_amount DESC LIMIT 15;
+- "Accounts with rapid layering" / "Layering patterns" -> SELECT sender_account_number, sender_customer_name, COUNT(*) as transfer_count, SUM(transaction_amount) as total_layering_volume, GROUP_CONCAT(DISTINCT receiver_account_number) as downstream_beneficiaries FROM bank_transactions GROUP BY sender_account_number HAVING transfer_count > 1 ORDER BY transfer_count DESC, total_layering_volume DESC LIMIT 15;
+- "Calls before transactions" / "Transfers within 10 mins of calls" -> SELECT bt.transaction_id, bt.timestamp as tx_time, bt.transaction_amount, bt.transaction_mode, bt.sender_customer_name, bt.sender_account_number, bt.receiver_customer_name, bt.receiver_account_number, cr.cdr_id, cr.call_start_time, cr.a_party_number, cr.b_party_number, bcl.time_difference_seconds FROM bank_transactions bt JOIN bank_cdr_links bcl ON bt.transaction_id = bcl.transaction_id JOIN cdr_records cr ON bcl.cdr_id = cr.cdr_id ORDER BY ABS(bcl.time_difference_seconds) ASC, bt.transaction_amount DESC LIMIT 20;
+- "Identify mule account clusters" -> SELECT receiver_account_number, receiver_customer_name, receiver_bank_name, COUNT(*) as incoming_count, SUM(transaction_amount) as total_received FROM bank_transactions GROUP BY receiver_account_number ORDER BY incoming_count DESC, total_received DESC LIMIT 15;
+- "Find shared IP & IMEI devices" -> SELECT device_imei, source_ip_address, COUNT(*) as session_count, COUNT(DISTINCT subscriber_msisdn) as unique_phones, GROUP_CONCAT(DISTINCT subscriber_msisdn) as associated_phones FROM ipdr_records WHERE device_imei != '' AND device_imei != 'Unknown' GROUP BY device_imei ORDER BY unique_phones DESC, session_count DESC LIMIT 25;
 2. If the question is general, conceptual, or about data not present, set sql_query to null and answer fully in general_answer.
 3. If you are unsure whether data exists, prefer returning sql_query and let the engine report zero rows.
 4. Keep every key in the JSON object; values may be null.
@@ -69,22 +76,39 @@ RULES:
 """
 
 INTERPRETATION_PROMPT = """You are Tri-Netra Forensics's Senior Cyber-Forensic Analyst & Investigative Co-Pilot.
-You have been asked an investigative query. An automated system executed a SQL query against the forensic database (Bank, CDR, IPDR) and retrieved the EXACT matching rows.
+You have been asked an investigative query by a Law Enforcement Officer. An automated system executed a SQL query against the forensic database (Bank, CDR, IPDR) and retrieved the EXACT matching rows.
 
-Your objective is to read the retrieved SQL rows and generate an Evidentiary Chain-of-Thought, executive lead summary, and final answer grounded STRICTLY in the provided rows.
+Your objective is to read the retrieved SQL rows and generate an in-depth, evidentiary forensic dossier formatted with rich Markdown:
+1. "cot_reasoning": 3+ evidentiary chain-of-thought bullet points detailing accounts, amounts, telecom overlaps, and velocity.
+2. "executive_summary": A high-impact 1-paragraph summary for a cyber cell officer detailing the primary suspect account/phone/device, total amounts transferred, channel, and immediate next investigative action.
+3. "suspicion_reasoning": Concrete cyber-forensic analysis of WHY this pattern is suspicious (e.g. rapid mule layering, structuring under ₹1,00,000 reporting threshold, cash deposit without source KYC, shared IMEI device rotation, out-of-circle telecom coordination).
+4. "final_answer": A structured, clean, high-density Markdown dossier with sections:
+   - For Financial / Fused Queries:
+     - ### 📋 Executive Intelligence Dossier (Transaction/Entity ID, Execution Timestamp, Amount in ₹, Payment Channel, Linked Devices)
+     - ### 🔄 Fund Flow & Counterparty Profiling (Markdown table comparing Originating Sender vs Beneficiary Receiver with Accounts, Banks, and Phones/Devices)
+     - ### ⚠️ Forensic Suspicion & Crime Typology Analysis (Detailed breakdown of velocity, structuring, pass-through, or mule indicators)
+     - ### 🛡️ Actionable Law Enforcement Next Steps (Specific statutory recommendations: Section 91 CrPC notices, provisional freezes, CCTV requisition)
+   - For Device / Telecom / IPDR Queries (where monetary amount is absent):
+     - ### 📋 Executive Intelligence Dossier (Target Identifier, Linked Subscriber MSISDN, Device IMEI, Network IP Footprint)
+     - ### 📱 Hardware & Network Linkages (Markdown table with Device IMEI, Subscriber Phone, Source IP, Destination IP, Session Time)
+     - ### ⚠️ Forensic Suspicion & Crime Typology Analysis (Analysis of shared IMEI rotation, multi-SIM hopping, or proxy routing)
+     - ### 🛡️ Actionable Law Enforcement Next Steps (Subpoena TSP for tower dumps, IPDR session logs, device seizure under Section 91 CrPC)
 
-OUTPUT CONTRACT — reply with a single JSON object, no prose around it:
+OUTPUT CONTRACT — reply with a single JSON object, no markdown codeblock wrapper or extra prose:
 {
-  "cot_reasoning": ["3+ evidentiary chain-of-thought steps analyzing the returned rows"],
-  "executive_summary": "lead paragraph for a senior cyber cell officer summarizing the suspicious entity, layer role, amounts, and recommended enforcement action.",
-  "suspicion_reasoning": "Explicitly state WHY the retrieved records are suspicious based on cyber-forensic patterns. If the transaction or entity appears normal, explicitly state: 'No suspicious patterns detected.'",
-  "final_answer": "a direct, grounded answer to the investigator's question, 2-5 sentences, naming the specific accounts/phones/transaction IDs/amounts/dates from the EXECUTED QUERY ROWS. Never invent ids, amounts or names — if the rows have nothing relevant, say so explicitly."
+  "cot_reasoning": ["..."],
+  "executive_summary": "...",
+  "suspicion_reasoning": "...",
+  "final_answer": "..."
 }
 
 RULES:
-1. Grounding: Cross-check every number you quote against the executed query rows. Do NOT invent data.
-2. Executive summaries must name accounts/phones with amounts and a recommended enforcement action based on the data.
-3. Keep every key in the JSON object.
+1. Grounding: Cross-check every number, account ID, and date against the executed query rows. Do NOT invent data.
+2. All monetary amounts MUST be formatted in Indian Rupees (e.g. ₹92,770.24).
+3. Markdown Tables MUST have a newline (\\n) between each row. Example:
+   | Role | Name | Bank | Account | Phone |\\n| :--- | :--- | :--- | :--- | :--- |\\n| Sender | John | SBI | 1234 | 9876 |\\n| Receiver | Jane | HDFC | 5678 | 9875 |\\nNever output double pipes '||' without a newline.
+4. If a query or record is about device hardware / IPDR sessions, do NOT fill financial fields with 'N/A'—instead adapt the table to show Device IMEIs, Phone Numbers, and IP addresses.
+5. Keep every key in the JSON object.
 """
 
 TRANSLATE_PROMPT = """You are a translator for Tri-Netra Forensics, an Indian cyber-forensic investigation platform.

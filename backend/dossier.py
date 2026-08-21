@@ -97,8 +97,9 @@ def generate_dossier(bundle: dict, kind: str, value: str) -> Dict[str, Any]:
             connections = sender_intel.get("links", {})
             
             # Use timeline for Journey
-            events = fusion.cached_build_timeline(bundle, "account", account_no)
-            for e in events:
+            all_events = fusion.cached_build_timeline(bundle)
+            events = [e for e in all_events if str(account_no).lower() in str(e.get("entity", "")).lower() or str(account_no).lower() in str(e.get("label", "")).lower() or str(account_no).lower() in str(e.get("record_id", "")).lower()]
+            for e in events[:50]:
                 journey.append({
                     "timestamp": f"{e.get('date', '')} {e.get('ts', '')}",
                     "event": f"[{e.get('kind', '')}] {e.get('detail', '')}"

@@ -206,6 +206,21 @@ export interface IngestStatus {
   errors: string[];
 }
 
+export interface CopilotTokenStats {
+  active_model: string;
+  active_keys_count: number;
+  base_tpm_limit: number;
+  total_tpm_capacity: number;
+  used_last_minute: number;
+  remaining_tpm: number;
+  pct_remaining: number;
+  last_query: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
 export interface Summary {
   bank_records: number;
   cdr_records: number;
@@ -237,6 +252,15 @@ export interface Alert {
   mode?: string;
   customer_name?: string;
   customer_phone?: string;
+  sender_name?: string;
+  sender_account?: string;
+  sender_phone?: string;
+  receiver_name?: string;
+  receiver_account?: string;
+  receiver_phone?: string;
+  counterparty_name?: string;
+  counterparty_bank?: string;
+  account_no?: string;
   date?: string;
   time?: string;
   explain_plain?: string;
@@ -849,6 +873,10 @@ export const api = {
       `STR_${transactionId}.pdf`
     );
   },
+  transactionEvidence: (transactionId: string) =>
+    request<{ evidence: any; narrative: any }>(
+      `/report/transaction/${encodeURIComponent(transactionId)}/evidence`
+    ),
   downloadEntityReport: async (kind: string, value: string): Promise<void> => {
     await downloadBlob(
       `/report/entity/${encodeURIComponent(kind)}/${encodeURIComponent(value)}`,
@@ -938,6 +966,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  copilotTokenStats: () => request<CopilotTokenStats>("/v1/copilot/token-stats"),
   copilotEntityDetails: (entityId: string, includeAudit = false) =>
     request<any>(`/v1/copilot/entity/${encodeURIComponent(entityId)}/details?include_audit=${includeAudit}`),
   copilotEntityAudit: (entityId: string) =>

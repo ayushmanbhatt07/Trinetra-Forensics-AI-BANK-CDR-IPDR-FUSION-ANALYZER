@@ -36,9 +36,9 @@ const SOURCE_ICON: Record<string, React.ElementType> = {
 function Kpi({ label, value, accent = "text-foreground" }: { label: string; value: React.ReactNode; accent?: string }) {
   if (value === undefined || value === null || value === "" || value === "NaN") return null;
   return (
-    <div className="flex flex-col gap-1 p-3 bg-secondary/20 rounded-lg border border-border/50 min-w-0">
-      <span className="text-[10px] uppercase font-semibold text-muted-foreground tracking-widest truncate">{label}</span>
-      <span className={`font-mono font-medium break-all ${accent}`}>{value}</span>
+    <div className="flex flex-col gap-1.5 p-3.5 bg-secondary/20 rounded-xl border border-border/50 min-w-0 shadow-sm">
+      <span className="text-[10px] uppercase font-bold text-muted-foreground tracking-widest truncate">{label}</span>
+      <span className={`font-mono text-sm font-semibold break-words select-all leading-snug ${accent}`}>{value}</span>
     </div>
   );
 }
@@ -137,7 +137,7 @@ export function EventDossierPanel({
       <DialogContent 
         showCloseButton={false}
         onInteractOutside={() => onClose()}
-        className="max-w-[95vw] w-[1200px] max-h-[95vh] overflow-hidden flex flex-col p-0 gap-0 bg-background border border-border/60 shadow-2xl"
+        className="w-[94vw] max-w-[1400px] sm:max-w-[94vw] lg:max-w-[1400px] max-h-[92vh] overflow-hidden flex flex-col p-0 gap-0 bg-background border border-border/60 shadow-2xl"
       >
         
         {/* Header */}
@@ -206,12 +206,12 @@ export function EventDossierPanel({
         <div className="flex-1 overflow-hidden">
           <Tabs defaultValue="overview" className="w-full h-full flex flex-col">
             <div className="px-6 border-b border-border bg-muted/10">
-              <TabsList className="h-12 bg-transparent gap-6 p-0">
-                <TabsTrigger value="overview" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold">Overview</TabsTrigger>
-                <TabsTrigger value="raw" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold">Source Data</TabsTrigger>
-                <TabsTrigger value="identities" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold">Identities</TabsTrigger>
-                <TabsTrigger value="correlations" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold">Correlations</TabsTrigger>
-                <TabsTrigger value="risk" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold">Rule Evidence</TabsTrigger>
+              <TabsList className="h-12 bg-transparent gap-4 md:gap-6 p-0 overflow-x-auto max-w-full flex-nowrap shrink-0">
+                <TabsTrigger value="overview" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold whitespace-nowrap shrink-0">Overview</TabsTrigger>
+                <TabsTrigger value="raw" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold whitespace-nowrap shrink-0">Source Data</TabsTrigger>
+                <TabsTrigger value="identities" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold whitespace-nowrap shrink-0">Identities</TabsTrigger>
+                <TabsTrigger value="correlations" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold whitespace-nowrap shrink-0">Correlations</TabsTrigger>
+                <TabsTrigger value="risk" className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-emerald-500 rounded-none px-0 h-12 uppercase tracking-wider text-xs font-semibold whitespace-nowrap shrink-0">Rule Evidence</TabsTrigger>
               </TabsList>
             </div>
             
@@ -281,13 +281,17 @@ export function EventDossierPanel({
               </TabsContent>
 
               <TabsContent value="raw" className="m-0 space-y-4">
-                 <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-2 font-mono text-sm bg-secondary/10 p-6 rounded-lg border border-border/50">
+                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 p-5 bg-secondary/10 rounded-xl border border-border/50">
                    {Object.entries(dossier.source_record).map(([k, v]) => {
                      if (v === null || v === undefined || v === "") return null;
                      return (
-                       <div key={k} className="flex justify-between py-1 border-b border-border/30 last:border-0">
-                         <span className="text-muted-foreground">{k}</span>
-                         <span className="text-foreground text-right break-all ml-4">{String(v)}</span>
+                       <div key={k} className="flex flex-col gap-1.5 p-3.5 bg-card/75 rounded-lg border border-border/60 min-w-0 shadow-sm hover:border-emerald-500/30 transition-colors">
+                         <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-muted-foreground/80 truncate">
+                           {k}
+                         </span>
+                         <span className="font-mono text-sm font-semibold text-foreground break-words select-all leading-relaxed">
+                           {String(v)}
+                         </span>
                        </div>
                      )
                    })}
@@ -300,7 +304,7 @@ export function EventDossierPanel({
                      <div className="text-muted-foreground italic text-sm p-4">No identities linked.</div>
                    )}
                    {dossier.identities.map((id, i) => (
-                     <div key={i} className="flex items-center gap-3 p-4 bg-secondary/20 border border-border/50 rounded-lg hover:bg-secondary/40 transition-colors cursor-pointer"
+                     <div key={i} className="flex items-center gap-3 p-4 bg-secondary/20 border border-border/50 rounded-lg hover:bg-secondary/40 transition-colors cursor-pointer min-w-0"
                        onClick={() => {
                          // Default mapping for graph navigation
                          let apiKind = "entity";
@@ -311,12 +315,12 @@ export function EventDossierPanel({
                          onEntitySelect(apiKind, id.value);
                        }}
                      >
-                        <div className="p-2 bg-emerald-500/10 rounded-md">
+                        <div className="p-2 bg-emerald-500/10 rounded-md shrink-0">
                           <Network className="w-4 h-4 text-emerald-500" />
                         </div>
-                        <div>
-                          <div className="text-[10px] text-muted-foreground font-semibold tracking-wider">{id.type}</div>
-                          <div className="font-mono text-sm">{id.value}</div>
+                        <div className="min-w-0">
+                          <div className="text-[10px] text-muted-foreground font-semibold tracking-wider uppercase truncate">{id.type}</div>
+                          <div className="font-mono text-sm font-semibold break-words select-all">{id.value}</div>
                         </div>
                      </div>
                    ))}

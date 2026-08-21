@@ -147,8 +147,29 @@ def get_event_dossier(bundle: dict, source_type: str, event_id: str) -> Dict[str
     }
     
     target_ts = None
-    
-    if source_type.lower() == "bank":
+    st = source_type.lower()
+
+    # Auto-resolve actual source_type if event_id is found in another dataset
+    if st == "bank" and not any(str(r.get("txn_id")) == event_id for r in bundle.get("bank", [])):
+        if any(str(r.get("cdr_id")) == event_id for r in bundle.get("cdr", [])): st = "cdr"
+        elif any(str(r.get("ipdr_id")) == event_id for r in bundle.get("ipdr", [])): st = "ipdr"
+        elif any(str(r.get("complaint_id")) == event_id for r in bundle.get("complaints", [])): st = "complaint"
+    elif st == "cdr" and not any(str(r.get("cdr_id")) == event_id for r in bundle.get("cdr", [])):
+        if any(str(r.get("txn_id")) == event_id for r in bundle.get("bank", [])): st = "bank"
+        elif any(str(r.get("ipdr_id")) == event_id for r in bundle.get("ipdr", [])): st = "ipdr"
+        elif any(str(r.get("complaint_id")) == event_id for r in bundle.get("complaints", [])): st = "complaint"
+    elif st == "ipdr" and not any(str(r.get("ipdr_id")) == event_id for r in bundle.get("ipdr", [])):
+        if any(str(r.get("txn_id")) == event_id for r in bundle.get("bank", [])): st = "bank"
+        elif any(str(r.get("cdr_id")) == event_id for r in bundle.get("cdr", [])): st = "cdr"
+        elif any(str(r.get("complaint_id")) == event_id for r in bundle.get("complaints", [])): st = "complaint"
+    elif st == "complaint" and not any(str(r.get("complaint_id")) == event_id for r in bundle.get("complaints", [])):
+        if any(str(r.get("txn_id")) == event_id for r in bundle.get("bank", [])): st = "bank"
+        elif any(str(r.get("cdr_id")) == event_id for r in bundle.get("cdr", [])): st = "cdr"
+        elif any(str(r.get("ipdr_id")) == event_id for r in bundle.get("ipdr", [])): st = "ipdr"
+
+    out["source_type"] = st.upper()
+
+    if st == "bank":
         record = next((r for r in bundle.get("bank", []) if str(r.get("txn_id")) == event_id), None)
         if not record:
             return {}

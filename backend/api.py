@@ -109,6 +109,12 @@ app.add_middleware(
 
 
 app.include_router(copilot_router.router)
+
+@app.get("/v1/copilot/token-stats")
+def app_copilot_token_stats(user: dict = Depends(auth.require_user)):
+    from investigative_copilot.router import get_copilot_token_stats
+    return get_copilot_token_stats(user=user)
+
 # Force reload for copilot and cache locks
 _state: dict = {}
 if "backend.api" in sys.modules:
@@ -807,6 +813,22 @@ def transaction_report(transaction_id: str,
                         filename=f"STR_{transaction_id}.pdf")
 
 
+@app.get("/report/transaction/{transaction_id}/evidence")
+def transaction_evidence(transaction_id: str,
+                         user: dict = Depends(auth.require_user)):
+    """Returns the normalized CaseEvidence object and narrative for frontend visual STR."""
+    b = _require_bundle(user)
+    from .str_engine import STRCaseBuilder
+    from .str_narrative import generate_str_narrative
+    try:
+        builder = STRCaseBuilder(b, transaction_id)
+        evidence_obj = builder.build_case_evidence()
+        narrative_obj = generate_str_narrative(evidence_obj)
+        return {"evidence": evidence_obj, "narrative": narrative_obj}
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
 @app.get("/reports/intelligence")
 def reports_intelligence(user: dict = Depends(auth.require_user)):
     """Aggregated forensic intelligence for the Reports centre.
@@ -1164,35 +1186,67 @@ def fused_data_csv(q: str = Query(""), account: str = Query(""), mode: str = Que
 def _enrich_txn_row(row: dict, bank_by_id: dict, acc_to_name: dict = None) -> dict:
     tid = row.get("transaction_id") or row.get("txn_id") or ""
     raw = bank_by_id.get(tid, {})
-    acc_no = str(row.get("account_no") or raw.get("account_no") or "").strip()
+    acc_no = str(row.get("account_no") or raw.get("account_no") or raw.get("sender_account_number") or "").strip()
 
-    name = (
-        row.get("customer_name")
-        or raw.get("customer_name")
+    sender_name = (
+        row.get("sender_name")
+        or row.get("customer_name")
+        or raw.get("sender_customer_name")
         or raw.get("account_name")
+        or raw.get("customer_name")
         or raw.get("holder")
         or (acc_to_name.get(acc_no) if acc_to_name else "")
+        or ""
+    )
+    receiver_name = (
+        row.get("receiver_name")
+        or raw.get("receiver_customer_name")
         or raw.get("counterparty_name")
         or raw.get("merchant_name")
         or ""
     )
-    phone = (
-        row.get("customer_phone")
-        or raw.get("customer_phone")
+    sender_account = acc_no
+    receiver_account = str(
+        row.get("receiver_account")
+        or raw.get("receiver_account_number")
+        or raw.get("receiver_account")
+        or raw.get("counterparty_account")
+        or ""
+    ).strip()
+    
+    sender_phone = (
+        row.get("sender_phone")
+        or row.get("customer_phone")
+        or raw.get("sender_phone_number")
         or raw.get("sender_phone")
+        or raw.get("customer_phone")
         or raw.get("phone")
-        or row.get("sender_customer_id")
+        or (str(row.get("sender_customer_id", "")) if str(row.get("sender_customer_id", "")).isdigit() and len(str(row.get("sender_customer_id"))) >= 10 else "")
+        or ""
+    )
+    receiver_phone = (
+        row.get("receiver_phone")
+        or raw.get("receiver_phone_number")
+        or raw.get("receiver_phone")
         or ""
     )
     return {
         **row,
-        "date": row.get("date") or raw.get("date") or "",
+        "date": row.get("date") or raw.get("date") or raw.get("timestamp") or "",
         "time": row.get("time") or raw.get("time") or "",
-        "mode": row.get("mode") or raw.get("mode") or "",
-        "bank": row.get("bank") or raw.get("bank") or "",
-        "customer_name": name,
-        "account_name": name,
-        "customer_phone": phone,
+        "mode": row.get("mode") or raw.get("mode") or raw.get("transaction_mode") or "",
+        "bank": row.get("bank") or raw.get("bank") or raw.get("sender_bank_name") or "",
+        "counterparty_bank": row.get("counterparty_bank") or raw.get("receiver_bank_name") or raw.get("counterparty_bank") or "",
+        "customer_name": sender_name,
+        "sender_name": sender_name,
+        "sender_account": sender_account,
+        "sender_phone": sender_phone,
+        "receiver_name": receiver_name,
+        "receiver_account": receiver_account,
+        "receiver_phone": receiver_phone,
+        "counterparty_name": receiver_name,
+        "account_name": sender_name,
+        "customer_phone": sender_phone,
     }
 
 

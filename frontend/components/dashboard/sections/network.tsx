@@ -344,9 +344,66 @@ export const NetworkSection = React.memo(function NetworkSection() {
   const [cycleItems, setCycleItems] = useState<OrbitItem[]>([]);
   const [cycleVisible, setCycleVisible] = useState(false);
   const [cycleReplay, setCycleReplay] = useState(0);
+  const [selectedFilterIds, setSelectedFilterIds] = useState<string[]>(() => {
+    try {
+      const raw = typeof window !== "undefined" ? sessionStorage.getItem("network_selected_entities") : null;
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    const handleFilter = (e: Event) => {
+      const custom = e as CustomEvent<{ selectedIds: string[] }>;
+      if (custom.detail?.selectedIds) {
+        setSelectedFilterIds(custom.detail.selectedIds);
+      }
+    };
+    window.addEventListener("nav:network_filter", handleFilter);
+    return () => window.removeEventListener("nav:network_filter", handleFilter);
+  }, []);
+
+  const clearNetworkFilter = () => {
+    setSelectedFilterIds([]);
+    try {
+      sessionStorage.removeItem("network_selected_entities");
+    } catch (e) {}
+  };
 
   // In-memory client cache for graph views (0ms instant tab switching)
   const networkCacheRef = useRef<Map<string, any>>(new Map());
+
+  // Filter money graph for multi-transaction selection
+  const filteredMoneyGraph = useMemo(() => {
+    if (!moneyGraph || selectedFilterIds.length === 0) return moneyGraph;
+    const filterSet = new Set(selectedFilterIds.map(x => x.toLowerCase()));
+    
+    const matchedEdges = moneyGraph.edges.filter(e => {
+      const s = e.source.toLowerCase();
+      const t = e.target.toLowerCase();
+      return filterSet.has(s) || filterSet.has(t) || Array.from(filterSet).some(id => s.includes(id) || t.includes(id));
+    });
+
+    const activeNodeIds = new Set<string>();
+    matchedEdges.forEach(e => {
+      activeNodeIds.add(e.source);
+      activeNodeIds.add(e.target);
+    });
+
+    const matchedNodes = moneyGraph.nodes.filter(n => activeNodeIds.has(n.id) || filterSet.has(n.id.toLowerCase()));
+    const finalNodes = matchedNodes.length > 0 ? matchedNodes : moneyGraph.nodes;
+    const finalEdges = matchedEdges.length > 0 ? matchedEdges : moneyGraph.edges;
+
+    return {
+      nodes: finalNodes,
+      edges: finalEdges,
+      stats: {
+        nodes: finalNodes.length,
+        edges: finalEdges.length
+      }
+    };
+  }, [moneyGraph, selectedFilterIds]);
 
   // Clear cache if active dataset changes
   useEffect(() => {
@@ -542,6 +599,20 @@ export const NetworkSection = React.memo(function NetworkSection() {
           </div>
         </CardHeader>
         <CardContent>
+          {selectedFilterIds.length > 0 && (
+            <div className="flex items-center justify-between p-3.5 mb-5 rounded-xl border border-cyan-500/40 bg-cyan-950/40 text-cyan-300 text-xs font-mono shadow-xl backdrop-blur-sm">
+              <div className="flex items-center gap-2">
+                <Filter className="w-4 h-4 text-cyan-400 animate-pulse" />
+                <span>
+                  Cross-Bank Sub-Graph Filtered for <strong>{selectedFilterIds.length}</strong> multi-selected transactions
+                </span>
+              </div>
+              <button onClick={clearNetworkFilter} className="px-3 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white transition-colors border border-slate-700">
+                Clear Filter
+              </button>
+            </div>
+          )}
+
           {tab === "calls" && (
             <div className="flex flex-col items-center gap-4">
               <div className="flex items-center gap-2 w-full max-w-2xl flex-wrap justify-center">
@@ -642,7 +713,7 @@ export const NetworkSection = React.memo(function NetworkSection() {
               {!loading && moneyGraph && moneyGraph.edges.length > 0 && (
                 <>
                   <MoneyGraphView
-                    graph={moneyGraph}
+                    graph={filteredMoneyGraph || moneyGraph}
                     onNodeClick={(id, kind) => openEntity(nodeKindOf(id, kind), id)}
                     onEdgeClick={openRelationship}
                   />
