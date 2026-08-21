@@ -1,0 +1,39 @@
+name: Fetch Backend Logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: 'Number of log lines to fetch'
+        required: true
+        default: '200'
+        type: choice
+        options:
+          - '50'
+          - '200'
+          - '500'
+          - '1000'
+          - 'all'
+
+jobs:
+  fetch-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Logs via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            echo "=================================================================="
+            echo "Fetching last ${{ inputs.lines }} lines of backend logs..."
+            echo "=================================================================="
+            if [ "${{ inputs.lines }}" = "all" ]; then
+              docker logs trinetra-backend
+            else
+              docker logs --tail ${{ inputs.lines }} trinetra-backend
+            fi
+            echo "=================================================================="
+            echo "End of logs."
