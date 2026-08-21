@@ -93,14 +93,14 @@ jobs:
             docker rm trinetra-backend || true
             
             # Ensure the deployment directories and .env exist
-            mkdir -p /opt/trinetra/data/cases
+            sudo mkdir -p /opt/trinetra/data/cases
             if [ ! -f /opt/trinetra/.env ]; then
               echo "WARNING: /opt/trinetra/.env not found, creating baseline fallback .env"
-              touch /opt/trinetra/.env
+              sudo touch /opt/trinetra/.env
             fi
             
             # Ensure permissive data directory permissions for container user
-            chmod -R 777 /opt/trinetra/data || chown -R 999:999 /opt/trinetra/data
+            sudo chmod -R 777 /opt/trinetra/data || true
             
             # Start the new container
             docker run -d \
