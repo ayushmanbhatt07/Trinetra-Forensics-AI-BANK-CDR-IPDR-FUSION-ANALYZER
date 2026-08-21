@@ -72,22 +72,38 @@ def _float(key: str, default: float) -> float:
 def data_dir() -> Path:
     raw = _get("DATA_DIR")
     if not os.path.isabs(raw):
-        base = Path(__file__).resolve().parent
-        d = (base / raw).expanduser().resolve()
+        if os.path.exists("/app/data"):
+            d = Path("/app/data").resolve()
+        else:
+            base = Path(__file__).resolve().parent
+            d = (base / raw).expanduser().resolve()
     else:
         d = Path(raw).expanduser().resolve()
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        import tempfile
+        d = Path(tempfile.gettempdir()) / "trinetra_data"
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def case_dir() -> Path:
     raw = _get("CASE_DIR")
     if not os.path.isabs(raw):
-        base = Path(__file__).resolve().parent
-        d = (base / raw).expanduser().resolve()
+        if os.path.exists("/app/data/cases"):
+            d = Path("/app/data/cases").resolve()
+        else:
+            base = Path(__file__).resolve().parent
+            d = (base / raw).expanduser().resolve()
     else:
         d = Path(raw).expanduser().resolve()
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        import tempfile
+        d = Path(tempfile.gettempdir()) / "trinetra_data" / "cases"
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 

@@ -22,7 +22,7 @@ COPY backend/ backend/
 COPY investigative_copilot/ investigative_copilot/
 
 # Create data directory with appropriate permissions
-RUN mkdir -p /app/data /app/data/cases && chown -R appuser:appuser /app/data
+RUN mkdir -p /app/data /app/data/cases /app/backend/data && chown -R appuser:appuser /app
 
 USER appuser
 

@@ -108,6 +108,8 @@ jobs:
               --restart unless-stopped \
               -p 8000:8000 \
               -v /opt/trinetra/data:/app/data \
+              -e APP_DATA_DIR=/app/data \
+              -e APP_CASE_DIR=/app/data/cases \
               --env-file /opt/trinetra/.env \
               $NEW_IMAGE
             
@@ -141,6 +143,8 @@ jobs:
                   --restart unless-stopped \
                   -p 8000:8000 \
                   -v /opt/trinetra/data:/app/data \
+                  -e APP_DATA_DIR=/app/data \
+                  -e APP_CASE_DIR=/app/data/cases \
                   --env-file /opt/trinetra/.env \
                   $OLD_IMAGE
                 
