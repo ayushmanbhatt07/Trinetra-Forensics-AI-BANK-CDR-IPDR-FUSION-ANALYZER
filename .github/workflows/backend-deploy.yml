@@ -92,11 +92,15 @@ jobs:
             docker stop trinetra-backend || true
             docker rm trinetra-backend || true
             
-            # Ensure the deployment data directory exists
-            mkdir -p /opt/trinetra/data
+            # Ensure the deployment directories and .env exist
             mkdir -p /opt/trinetra/data/cases
-            # The container runs as appuser (UID/GID 999)
-            chown -R 999:999 /opt/trinetra/data
+            if [ ! -f /opt/trinetra/.env ]; then
+              echo "WARNING: /opt/trinetra/.env not found, creating baseline fallback .env"
+              touch /opt/trinetra/.env
+            fi
+            
+            # Ensure permissive data directory permissions for container user
+            chmod -R 777 /opt/trinetra/data || chown -R 999:999 /opt/trinetra/data
             
             # Start the new container
             docker run -d \
@@ -107,21 +111,26 @@ jobs:
               --env-file /opt/trinetra/.env \
               $NEW_IMAGE
             
-            # Health check loop (wait up to 60 seconds)
-            echo "Waiting for container to start..."
+            # Health check loop (wait up to 90 seconds for cold-start ML imports)
+            echo "Waiting for container to start and initialize ML engines..."
             HEALTHY=false
-            for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            for i in $(seq 1 18); do
               if curl -s -f http://localhost:8000/health > /dev/null; then
                 HEALTHY=true
                 break
               fi
+              echo "Health check attempt $i/18: waiting 5s..."
               sleep 5
             done
             
             if [ "$HEALTHY" = true ]; then
-              echo "Deployment successful."
+              echo "Deployment successful! Container is healthy and responding."
+              docker ps --filter "name=trinetra-backend"
               exit 0
             else
+              echo "================ CONTAINER LOGS (STARTUP FAILURE) ================"
+              docker logs --tail 100 trinetra-backend || true
+              echo "=================================================================="
               echo "Health check failed! Rolling back to previous version..."
               docker stop trinetra-backend || true
               docker rm trinetra-backend || true
@@ -137,7 +146,7 @@ jobs:
                 
                 echo "Waiting for rollback container to start..."
                 ROLLBACK_HEALTHY=false
-                for j in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                for j in $(seq 1 12); do
                   if curl -s -f http://localhost:8000/health > /dev/null; then
                     ROLLBACK_HEALTHY=true
                     break
@@ -149,6 +158,7 @@ jobs:
                   echo "Rollback to $OLD_IMAGE completed successfully. Marking deployment as failed."
                 else
                   echo "Rollback to $OLD_IMAGE FAILED health check. Service may be down."
+                  docker logs --tail 100 trinetra-backend || true
                 fi
               else
                 echo "No previous image found. Service is down."
