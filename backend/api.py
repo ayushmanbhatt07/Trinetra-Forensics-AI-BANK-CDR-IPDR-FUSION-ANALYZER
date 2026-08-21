@@ -1111,6 +1111,38 @@ def scoring_alerts(min_risk: float = Query(50, ge=0, le=100),
     return {"results": results, "total": len(results)}
 
 
+@app.get("/scoring/alerts/export")
+def scoring_alerts_export(min_risk: float = Query(50, ge=0, le=100),
+                          limit: int = Query(50000, le=200000),
+                          user: dict = Depends(auth.require_user)):
+    """Export anomalous alerts dataset as a styled Excel file (.xlsx)."""
+    # Fetch data using the same logic
+    data_dict = scoring_alerts(min_risk, limit, user)
+    results = data_dict.get("results", [])
+    
+    if not results:
+        # Create empty excel if no data
+        xls_bytes = generate_styled_excel(["Message"], [{"Message": "No alerts found matching criteria."}], "Alerts")
+    else:
+        # Extract keys dynamically from the first result or use standard columns
+        # To maintain neatness, we define an order for the critical ones
+        cols = ["transaction_id", "date", "time", "amount_usd", "mode", "sender_customer_id", 
+                "account_no", "bank", "risk_band", "risk_score", "rules_fired", "evidence", "explain_plain"]
+        # Add any remaining keys that might exist
+        all_keys = list(results[0].keys())
+        for k in all_keys:
+            if k not in cols and not isinstance(results[0][k], (list, dict)):
+                cols.append(k)
+                
+        xls_bytes = generate_styled_excel(cols, results, "Alerts Export")
+        
+    return StreamingResponse(
+        iter([xls_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="anomalous_alerts.xlsx"'},
+    )
+
+
 _FUSED_CSV_COLUMNS = (
     "transaction_id", "date", "time", "mode", "amount", "direction",
     "account_no", "account_name", "bank", "counterparty_name",
@@ -1150,14 +1182,14 @@ def fused_data(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=10
 
 
 
-@app.get("/data/fused.csv")
-def fused_data_csv(q: str = Query(""), account: str = Query(""), mode: str = Query(""),
-                   date_start: str = Query(""), date_end: str = Query(""),
-                   min_amount: float = Query(0.0, ge=0), max_amount: float = Query(0.0, ge=0),
-                   risk_band: str = Query(""),
-                   max_rows: int = Query(50000, ge=1, le=200000),
-                   user: dict = Depends(auth.require_user)):
-    """Download the fused dataset as CSV (the 'fused CSV' export)."""
+@app.get("/data/fused/export")
+def fused_data_export(q: str = Query(""), account: str = Query(""), mode: str = Query(""),
+                      date_start: str = Query(""), date_end: str = Query(""),
+                      min_amount: float = Query(0.0, ge=0), max_amount: float = Query(0.0, ge=0),
+                      risk_band: str = Query(""),
+                      max_rows: int = Query(50000, ge=1, le=200000),
+                      user: dict = Depends(auth.require_user)):
+    """Download the fused dataset as a styled Excel file (.xlsx)."""
     b = _require_bundle(user)
     # Apply scored if risk_band is specified
     scored = None
@@ -1169,17 +1201,13 @@ def fused_data_csv(q: str = Query(""), account: str = Query(""), mode: str = Que
     page = fused_table(b, offset=0, limit=max_rows, q=q, account=account, mode=mode,
                        scored=scored, date_start=date_start, date_end=date_end,
                        min_amount=min_amount, max_amount=max_amount, risk_band=risk_band)
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=_FUSED_CSV_COLUMNS,
-                            extrasaction="ignore")
-    writer.writeheader()
-    for row in page["rows"]:
-        writer.writerow({k: row.get(k) for k in _FUSED_CSV_COLUMNS})
-    data = "\ufeff" + buf.getvalue()
+                       
+    xls_bytes = generate_styled_excel(_FUSED_CSV_COLUMNS, page["rows"], "Fused Data")
+    
     return StreamingResponse(
-        iter([data]),
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="fused_data.csv"'},
+        iter([xls_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="fused_data.xlsx"'},
     )
 
 

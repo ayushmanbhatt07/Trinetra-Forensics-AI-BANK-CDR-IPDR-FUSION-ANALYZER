@@ -235,42 +235,14 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
     );
   });
 
-  const exportCSV = () => {
-    if (filteredAlerts.length === 0) {
-      toast.error("No anomalies to export.");
-      return;
+  const exportAlertsExcel = async () => {
+    const t = toast.loading("Preparing Excel Export...");
+    try {
+      await api.alertsExport(50, 50000);
+      toast.success("Excel export downloaded.", { id: t });
+    } catch (e) {
+      toast.error((e as { message?: string })?.message ?? "Failed to export Excel.", { id: t });
     }
-    const headers = ["Txn ID", "Cust ID", "Name", "Phone No", "Date/Time", "Amount", "Mode", "Risk", "Band"];
-    const rows = filteredAlerts.map((a) => {
-      const nameStr = String(a.customer_name || (a as any).account_name || (a as any).counterparty_name || (a as any).holder || "");
-      const phoneStr = String(a.customer_phone || "");
-      const dateTimeStr = a.date ? `${a.date} ${a.time ?? ""}`.trim() : "";
-      return [
-        a.transaction_id || "",
-        a.sender_customer_id || "",
-        nameStr,
-        phoneStr,
-        dateTimeStr,
-        a.amount_usd || "",
-        a.mode || "",
-        a.risk_score || "",
-        a.risk_band || ""
-      ];
-    });
-    const csvContent = [
-      headers.join(","),
-      ...rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(","))
-    ].join("\n");
-    
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.setAttribute("download", `anomalies_export_${new Date().getTime()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    toast.success("Anomalies exported successfully.");
   };
 
   // Determine what empty-state message to show
@@ -338,8 +310,8 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <Button variant="outline" size="sm" onClick={exportCSV}>
-              <Download className="mr-1 size-4" /> Export CSV
+            <Button variant="outline" size="sm" onClick={exportAlertsExcel}>
+              <Download className="mr-1 size-4" /> Export XLSX
             </Button>
             <Button variant="outline" size="sm" onClick={downloadSTR}>
               <FileText className="mr-1 size-4" /> STR

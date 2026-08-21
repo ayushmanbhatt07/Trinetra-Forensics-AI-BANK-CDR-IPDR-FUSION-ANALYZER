@@ -899,7 +899,7 @@ export const api = {
     return request<FusedPage>(`/data/fused?${params.toString()}`);
   },
 
-  fusedCsv: async (q = "", account = "", mode = "", dateStart = "", dateEnd = "", minAmount = 0.0, maxAmount = 0.0, riskBand = ""): Promise<void> => {
+  fusedExport: async (q = "", account = "", mode = "", dateStart = "", dateEnd = "", minAmount = 0.0, maxAmount = 0.0, riskBand = ""): Promise<void> => {
     const params = new URLSearchParams();
     if (q) params.set("q", q);
     if (account) params.set("account", account);
@@ -911,7 +911,7 @@ export const api = {
     if (riskBand) params.set("risk_band", riskBand);
     const token = bearerToken();
     const res = await fetch(
-      apiBaseUrl() + `/data/fused.csv?${params.toString()}`,
+      apiBaseUrl() + `/data/fused/export?${params.toString()}`,
       { headers: token ? { Authorization: `Bearer ${token}` } : {} }
     );
     if (!res.ok) {
@@ -928,7 +928,35 @@ export const api = {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "fused_records.csv";
+    a.download = "fused_records.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
+
+  alertsExport: async (minRisk = 50, limit = 50000): Promise<void> => {
+    const params = new URLSearchParams();
+    params.set("min_risk", minRisk.toString());
+    params.set("limit", limit.toString());
+    const token = bearerToken();
+    const res = await fetch(
+      apiBaseUrl() + `/scoring/alerts/export?${params.toString()}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    );
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const body = await res.json();
+        detail = body.detail || detail;
+      } catch {}
+      throw new ApiError(res.status, detail);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "anomalous_alerts.xlsx";
     document.body.appendChild(a);
     a.click();
     a.remove();

@@ -126,13 +126,13 @@ export const FusedSection = React.memo(function FusedSection() {
     return () => clearTimeout(t);
   }, [loadFused, fusedKey]);
 
-  const downloadFusedCsv = async () => {
-    const t = toast.loading("Preparing CSV...");
+  const downloadFusedExport = async () => {
+    const t = toast.loading("Preparing Excel Export...");
     try {
-      await api.fusedCsv(q, "", "all", dateStart, dateEnd, Number(minAmount) || 0, Number(maxAmount) || 0, riskBand);
-      toast.success("CSV export started.", { id: t });
+      await api.fusedExport(q, "", "all", dateStart, dateEnd, Number(minAmount) || 0, Number(maxAmount) || 0, riskBand);
+      toast.success("Excel export downloaded.", { id: t });
     } catch (e) {
-      toast.error((e as { message?: string })?.message ?? "Failed to export CSV.", { id: t });
+      toast.error((e as { message?: string })?.message ?? "Failed to export Excel.", { id: t });
     }
   };
 
@@ -230,9 +230,11 @@ export const FusedSection = React.memo(function FusedSection() {
               />
               <label htmlFor="risk-annotate">Risk annotation</label>
             </div>
-            <Button variant="outline" size="sm" onClick={downloadFusedCsv}>
-              <Download className="mr-1 size-4" /> CSV
-            </Button>
+            <div className="flex gap-2 mb-2 sm:mb-0">
+              <Button variant="outline" size="sm" onClick={downloadFusedExport}>
+                <Download className="mr-1 size-4" /> Export XLSX
+              </Button>
+            </div>
             <Button
               size="sm"
               className="bg-red-600 text-white hover:bg-red-700"

@@ -431,8 +431,12 @@ class InvestigativeCoPilotEngine:
                 f"2. Audit linked beneficiary account `{r_acc}` for secondary layering out-flows.\n"
                 f"3. Place provisional cyber lien / debit hold if associated with active cyber complaints."
             )
-            summary_text = f"Transaction {txn_id} for ₹{amt_f:,.2f} executed via {mode} from {s_name} to {r_name}."
-            risk_text = f"Transaction of ₹{amt_f:,.2f} via {mode} requiring statutory KYC verification."
+            summary_text = f"Record '{txn_id}' retrieved with primary details."
+            risk_text = f"Record {txn_id} requires review."
+            if amt_f > 0:
+                summary_text = f"Transaction {txn_id} for ₹{amt_f:,.2f} executed via {mode} from {s_name} to {r_name}."
+                risk_text = f"Transaction of ₹{amt_f:,.2f} via {mode} requiring statutory KYC verification."
+                
             return summary_text, answer_text, risk_text
 
         total_amt = 0.0
@@ -460,34 +464,31 @@ class InvestigativeCoPilotEngine:
             if d: dates.add(str(d))
             
         date_str = f"between {min(dates)} and {max(dates)}" if len(dates) > 1 else (f"on {list(dates)[0]}" if dates else "")
-        modes_str = ", ".join(sorted(modes)) if modes else "Electronic Transfers"
+        modes_str = "various modes" if len(modes) > 1 else (list(modes)[0] if modes else "database records")
         
-        # Format top transaction highlights
+        # Dynamically generate table based on actual keys to support CDR, IPDR, and aggregates
+        keys = list(records[0].keys())
+        # Limit to first 6-7 keys to avoid markdown table breaking
+        display_keys = keys[:7]
+        
         table_rows = []
-        for i, r in enumerate(records[:10], 1):
-            txn = r.get("transaction_id") or r.get("txn_id") or f"Record-{i}"
-            amt_v = r.get("transaction_amount")
-            if amt_v is None or amt_v == "":
-                amt_v = r.get("amount") or 0.0
-            try:
-                amt_f = float(amt_v)
-            except (ValueError, TypeError):
-                amt_f = 0.0
-                
-            mode = r.get("transaction_mode") or r.get("mode") or "Transfer"
-            date = r.get("date") or "N/A"
-            sender = r.get("sender_customer_name") or r.get("sender_account_number") or r.get("account_no") or "Originating Account"
-            receiver = r.get("receiver_customer_name") or r.get("counterparty_name") or r.get("receiver_account_number") or "Beneficiary"
-            amt_str = f"₹{amt_f:,.2f}" if amt_f > 0 else "Unspecified"
-            table_rows.append(f"| `{txn}` | {date} | **{amt_str}** | `{mode}` | {sender} | {receiver} |")
+        for r in records[:10]:
+            row_str = " | ".join(str(r.get(k, 'N/A')) for k in display_keys)
+            table_rows.append(f"| {row_str} |")
+            
+        header_names = [str(k).replace("_", " ").title() for k in display_keys]
+        header_str = "| " + " | ".join(header_names) + " |"
+        sep_str = "| " + " | ".join("---" for _ in display_keys) + " |"
+        table_markdown = header_str + "\n" + sep_str + "\n" + "\n".join(table_rows)
+            
+        amount_summary = f" totaling **₹{total_amt:,.2f}**" if total_amt > 0 else ""
             
         answer_text = (
             f"### 📋 Forensic Intelligence Summary\n"
-            f"Forensic search for **'{user_query}'** retrieved **{len(records)} matching transaction record(s)** "
-            f"{date_str} totaling **₹{total_amt:,.2f}** primarily executed via **{modes_str}**.\n\n"
-            f"### 🔄 Key Financial Transactions\n"
-            f"| Txn ID | Date | Amount | Mode | Originating Sender | Beneficiary Receiver |\n"
-            f"| :--- | :--- | :--- | :--- | :--- | :--- |\n" + "\n".join(table_rows) + "\n\n"
+            f"Forensic search for **'{user_query}'** retrieved **{len(records)} matching record(s)** "
+            f"{date_str}{amount_summary} primarily involving **{modes_str}**.\n\n"
+            f"### 🔄 Key Retrieved Records\n"
+            f"{table_markdown}\n\n"
             f"### 🛡️ Recommended Law Enforcement Next Steps\n"
             f"1. Issue Section 91 CrPC notices to identified reporting institutions for counterparty KYC dossiers.\n"
             f"2. Freeze beneficiary accounts receiving rapid pass-through velocity.\n"
@@ -497,14 +498,14 @@ class InvestigativeCoPilotEngine:
             answer_text += f"\n\n*... and {len(records) - 10} additional linked transaction(s) recorded in the database.*"
             
         summary_text = (
-            f"Search for '{user_query}' identified {len(records)} transaction record(s) "
-            f"with total turnover of ₹{total_amt:,.2f}. Primary beneficiaries: {', '.join(list(counterparties)[:3]) or 'Multiple'}. "
+            f"Search for '{user_query}' identified {len(records)} record(s) "
+            f"{amount_summary.strip()}. Primary beneficiaries: {', '.join(list(counterparties)[:3]) or 'Multiple'}. "
             f"Immediate action: issue Section 91 CrPC notice and audit linked KYC profiles."
         )
         
         risk_text = (
-            f"Observed turnover of ₹{total_amt:,.2f} across {len(records)} transaction(s) "
-            f"via {modes_str} exhibits high velocity funds movement requiring counterparty verification."
+            f"Observed velocity across {len(records)} record(s) "
+            f"via {modes_str} exhibits movement requiring counterparty verification."
         )
         
         return summary_text, answer_text, risk_text
