@@ -87,6 +87,12 @@ jobs:
             # Authenticate to GHCR on the server to pull the image
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             
+            # Pre-deployment disk cleanup to ensure sufficient disk headroom for image pull
+            echo "Disk status before deployment:"
+            df -h /
+            docker image prune -f || true
+            sudo rm -rf /tmp/backend_upload_* /tmp/trinetra_* 2>/dev/null || true
+            
             # Identify exact image to deploy
             NEW_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ env.CI_SHORT_SHA }}"
             
