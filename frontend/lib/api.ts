@@ -14,6 +14,13 @@ export interface DossierIntelligence {
     bank?: string;
     status?: string;
     reference?: string;
+    total_turnover?: number;
+    inflow?: number;
+    outflow?: number;
+    transaction_count?: number;
+    call_count?: number;
+    ipdr_count?: number;
+    peer_count?: number;
   };
   sender: {
     name?: string;
@@ -32,6 +39,7 @@ export interface DossierIntelligence {
     linked_sims?: string[];
     locations?: string[];
     kyc_status?: string;
+    total_turnover?: number;
   };
   receivers: {
     name?: string;

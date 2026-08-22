@@ -1080,11 +1080,17 @@ export const NetworkSection = React.memo(function NetworkSection() {
 
   const nodeKindOf = (id: string, kind?: string): string => {
     if (kind === "account") return "account";
-    if (kind === "device") return "imei";
-    if (kind === "ip") return "ip";
     if (kind === "phone") return "phone";
+    if (kind === "device" || kind === "imei") return "imei";
+    if (kind === "ip") return "ip";
+    if (kind === "upi") return "upi";
+    if (kind === "name") return "name";
+    if (kind === "transaction") return "transaction";
     if (id.includes("@")) return "upi";
-    if (/^\d{10,}$/.test(id.replace(/\D/g, ""))) return "phone";
+    if (id.startsWith("TXN") || id.startsWith("ATM") || id.startsWith("UPI") || id.startsWith("IMPS") || id.startsWith("NEFT") || id.startsWith("RTGS")) return "transaction";
+    // Phone numbers in India: +91..., 0..., or 10 digits starting with 6, 7, 8, 9
+    if (/^(\+91|0)?[6-9]\d{9}$/.test(id.replace(/\s+/g, ""))) return "phone";
+    if (/^\d{15}$/.test(id)) return "imei";
     return "account";
   };
 

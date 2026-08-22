@@ -214,8 +214,8 @@ export function InvestigationPanel({
               {/* OVERVIEW TAB */}
               <TabsContent value="overview" className="p-6 space-y-8 mt-0 focus-visible:outline-none">
                 
-                {/* 1. Primary Transaction Information */}
-                {dossier.kind === "transaction" && (
+                {/* 1. Primary Entity / Transaction Information */}
+                {dossier.kind === "transaction" ? (
                   <Section title="Primary Transaction Information" icon={ActivitySquare}>
                     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
                       <Kpi label="Transaction ID" value={dossier.value} accent="text-sky-400" />
@@ -230,6 +230,23 @@ export function InvestigationPanel({
                       <Kpi label="Risk Band" value={dossier.primary?.risk_band} />
                       <Kpi label="Fraud Prob" value={dossier.primary?.fraud_probability ? `${Math.round(dossier.primary.fraud_probability)}%` : "N/A"} />
                       <Kpi label="Model Conf" value={dossier.primary?.confidence ? `${Math.round(dossier.primary.confidence * 100)}%` : "N/A"} />
+                    </div>
+                  </Section>
+                ) : (
+                  <Section title={`Primary ${dossier.kind?.toUpperCase() || "ENTITY"} Forensic Summary`} icon={ActivitySquare}>
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                      <Kpi label="Target Identifier" value={dossier.value} accent="text-sky-400" />
+                      <Kpi label="Entity Kind" value={dossier.kind?.toUpperCase() || "ACCOUNT"} />
+                      <Kpi label="Total Turnover" value={fmtMoney(dossier.primary?.total_turnover || dossier.sender?.total_turnover)} accent="text-emerald-400" />
+                      <Kpi label="Inflow" value={fmtMoney(dossier.primary?.inflow)} accent="text-emerald-300" />
+                      <Kpi label="Outflow" value={fmtMoney(dossier.primary?.outflow)} accent="text-rose-400" />
+                      <Kpi label="Transactions" value={dossier.primary?.transaction_count ?? dossier.history?.avg_daily_txns ?? "—"} />
+                      <Kpi label="Connected Peers" value={dossier.receivers?.length || dossier.network?.degree || 0} accent="text-purple-400" />
+                      <Kpi label="Linked Phones" value={dossier.connections?.phones?.length || dossier.sender?.linked_sims?.length || 0} />
+                      <Kpi label="Risk Score" value={dossier.primary?.risk_score ?? 0} accent="text-amber-400" />
+                      <Kpi label="Risk Band" value={dossier.primary?.risk_band || "SAFE"} />
+                      <Kpi label="Associated Bank" value={dossier.sender?.bank || "Multi-Bank"} />
+                      <Kpi label="Confidence" value={dossier.primary?.confidence ? `${Math.round(dossier.primary.confidence * 100)}%` : "85%"} />
                     </div>
                   </Section>
                 )}
