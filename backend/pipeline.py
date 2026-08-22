@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FTimeout
 
 from . import detect, parsers
 from .errors import SkipFileError
@@ -191,53 +190,51 @@ def ingest_folder(folder: str, patterns: tuple[str, ...] | None = None,
                 continue
             paths_to_parse.append((fname, path))
 
-    from . import config
-    futures = {}
-    workers = config.parser_threads()
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for fname, path in paths_to_parse:
-            futures[ex.submit(_parse_one, path)] = (fname, path)
-            
-        for future in as_completed(futures):
-            fname, path = futures[future]
-            try:
-                parsed = future.result(timeout=_FILE_TIMEOUT)
-            except FTimeout:
-                files_skipped.append(f"{fname} (timeout)")
-                continue
-            except SkipFileError as e:
-                files_skipped.append(f"{fname} ({e.reason})")
-                continue
-            except ValueError as e:
-                if any(m in str(e) for m in _SKIP_ERRORS):
-                    files_skipped.append(fname)
-                else:
-                    errors.append(f"{fname}: {str(e)[:200]}")
-                continue
-            except Exception as e:
-                errors.append(f"{fname}: {str(e)[:200]}")
-                continue
-                
-            if parsed["kind"] == "ncrp":
-                complaints.extend(parsed["complaints"])
-                files_ok.append(fname)
-                continue
-            norm = parsed["norm"]
-            if norm is None:
+    # Parse files SEQUENTIALLY to prevent concurrent OOM on low-RAM VPS (<= 1GB RAM).
+    # Concurrent PDF/XLSX parsing with openpyxl/pdfminer holds multiple large file buffers
+    # simultaneously in RAM, causing Docker OOM kills -> 502 before ML pipeline even starts.
+    import gc
+    for fname, path in paths_to_parse:
+        try:
+            parsed = _parse_one(path)
+        except FTimeout:
+            files_skipped.append(f"{fname} (timeout)")
+            gc.collect()
+            continue
+        except SkipFileError as e:
+            files_skipped.append(f"{fname} ({e.reason})")
+            continue
+        except ValueError as e:
+            if any(m in str(e) for m in _SKIP_ERRORS):
                 files_skipped.append(fname)
-                continue
-            if norm["dataset"] == "BANK":
-                rows, dropped = _usable_bank(norm["records"])
-                if dropped:
-                    errors.append(f"{fname}: dropped {dropped} unparseable rows")
-                bank.extend(rows)
-            elif norm["dataset"] == "CDR":
-                cdr.extend(norm["records"])
-            elif norm["dataset"] == "IPDR":
-                ipdr.extend(norm["records"])
             else:
-                subscribers.extend(norm["records"])
+                errors.append(f"{fname}: {str(e)[:200]}")
+            continue
+        except Exception as e:
+            errors.append(f"{fname}: {str(e)[:200]}")
+            continue
+
+        if parsed["kind"] == "ncrp":
+            complaints.extend(parsed["complaints"])
             files_ok.append(fname)
+            continue
+        norm = parsed["norm"]
+        if norm is None:
+            files_skipped.append(fname)
+            continue
+        if norm["dataset"] == "BANK":
+            rows, dropped = _usable_bank(norm["records"])
+            if dropped:
+                errors.append(f"{fname}: dropped {dropped} unparseable rows")
+            bank.extend(rows)
+        elif norm["dataset"] == "CDR":
+            cdr.extend(norm["records"])
+        elif norm["dataset"] == "IPDR":
+            ipdr.extend(norm["records"])
+        else:
+            subscribers.extend(norm["records"])
+        files_ok.append(fname)
+        gc.collect()  # Release parsed file buffer before parsing the next file
 
     entities = extract_entities(bank, cdr, ipdr, subscribers, complaints)
     return {
