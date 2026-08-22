@@ -319,6 +319,18 @@ def transaction_features(bundle: dict) -> tuple[list[dict], np.ndarray]:
     for ph in cell_by_phone:
         cell_by_phone[ph].sort(key=lambda x: x[0])
 
+    first_seen_imei: dict[str, dict[str, float]] = defaultdict(dict)
+    for ph, hist in imei_by_phone.items():
+        for t, im in hist:
+            if im not in first_seen_imei[ph]:
+                first_seen_imei[ph][im] = t
+
+    first_seen_cell: dict[str, dict[str, float]] = defaultdict(dict)
+    for ph, hist in cell_by_phone.items():
+        for t, cl in hist:
+            if cl not in first_seen_cell[ph]:
+                first_seen_cell[ph][cl] = t
+
     prior_n: dict[str, int] = {}
     for cust, rows in by_cust.items():
         rows.sort(key=lambda x: float(x.get("ts") or 0.0))
@@ -367,21 +379,25 @@ def transaction_features(bundle: dict) -> tuple[list[dict], np.ndarray]:
             hist = imei_by_phone.get(phone) or []
             if hist:
                 i_prior = bisect.bisect_left(hist, (ts, ""))
-                near = {v for t, v in hist[i_prior:] if t < ts + 3600}
-                if near:
-                    prior_imeis = {v for _, v in hist[:i_prior]}
-                    if near - prior_imeis:
+                imei_lookup = first_seen_imei.get(phone, {})
+                for t, v in hist[i_prior:]:
+                    if t >= ts + 3600:
+                        break
+                    if imei_lookup.get(v, 0.0) >= ts:
                         novel_imei = 1
+                        break
         novel_cell = 0
         if ts and phone:
             hist = cell_by_phone.get(phone) or []
             if hist:
                 i_prior = bisect.bisect_left(hist, (ts, ""))
-                near = {v for t, v in hist[i_prior:] if t < ts + 3600}
-                if near:
-                    prior_cells = {v for _, v in hist[:i_prior]}
-                    if near - prior_cells:
+                cell_lookup = first_seen_cell.get(phone, {})
+                for t, v in hist[i_prior:]:
+                    if t >= ts + 3600:
+                        break
+                    if cell_lookup.get(v, 0.0) >= ts:
                         novel_cell = 1
+                        break
         rows_out.append({
             "txn_id": tid,
             "log_amount": float(np.log1p(amt)),

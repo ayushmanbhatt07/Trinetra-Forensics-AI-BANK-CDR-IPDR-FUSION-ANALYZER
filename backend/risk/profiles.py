@@ -82,19 +82,19 @@ def build_profiles(bundle: dict) -> dict:
         p["amounts"].append(amt)
         p["txn_count"] += 1
         ts = float(t.get("ts") or 0.0)
-        if ts:
-            import datetime as _dt
-            dt = _dt.datetime.fromtimestamp(ts,
-                _dt.timezone(_dt.timedelta(hours=5, minutes=30)))
-            day = dt.strftime("%Y-%m-%d")
-            p["days"].add(day)
-            p["hours"][dt.hour] += 1
-            p["weekdays"][dt.weekday()] += 1
-            p["first_ts"] = min(p["first_ts"] or ts, ts)
-            p["last_ts"] = max(p["last_ts"] or 0.0, ts)
         day = t.get("date") or ""
         if day:
             p["days"].add(day)
+        time_str = t.get("time") or ""
+        if len(time_str) >= 2 and time_str[:2].isdigit():
+            p["hours"][int(time_str[:2])] += 1
+        elif ts:
+            # Fast UTC+5:30 IST hour calculation without datetime object construction
+            ist_hour = int((ts + 19800) // 3600) % 24
+            p["hours"][ist_hour] += 1
+        if ts:
+            p["first_ts"] = min(p["first_ts"] or ts, ts)
+            p["last_ts"] = max(p["last_ts"] or 0.0, ts)
         if t.get("bank"):
             p["banks"][t["bank"]] += 1
         if t.get("receiver_account"):
