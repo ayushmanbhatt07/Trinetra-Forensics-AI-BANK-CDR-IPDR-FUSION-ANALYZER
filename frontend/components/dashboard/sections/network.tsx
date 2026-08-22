@@ -18,6 +18,8 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize2,
+  Minimize2,
+  RotateCcw,
   Search,
   X,
   Layers,
@@ -109,8 +111,57 @@ function GraphViewport({
   pan: { x: number; y: number };
   setPan: React.Dispatch<React.SetStateAction<{ x: number; y: number }>>;
 }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const isDragging = useRef(false);
   const dragStart = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isFs = Boolean(
+        document.fullscreenElement &&
+        containerRef.current &&
+        document.fullscreenElement === containerRef.current
+      );
+      setIsFullscreen(isFs);
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && isFullscreen) {
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+        setIsFullscreen(false);
+      }
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isFullscreen]);
+
+  const toggleFullscreen = async () => {
+    if (!containerRef.current) return;
+    try {
+      if (!isFullscreen) {
+        if (containerRef.current.requestFullscreen) {
+          await containerRef.current.requestFullscreen();
+        }
+        setIsFullscreen(true);
+      } else {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        }
+        setIsFullscreen(false);
+      }
+    } catch {
+      // Fallback state toggle for browsers restricting document fullscreen
+      setIsFullscreen((prev) => !prev);
+    }
+  };
 
   const handleMouseDown = (e: React.MouseEvent) => {
     // Only drag on background, not on buttons or nodes
@@ -140,15 +191,28 @@ function GraphViewport({
 
   return (
     <div
-      className="relative w-full overflow-hidden bg-slate-950/70 border border-border/80 rounded-xl cursor-grab active:cursor-grabbing select-none"
-      style={{ height: `${viewHeight}px` }}
+      ref={containerRef}
+      className={`relative w-full overflow-hidden bg-slate-950/70 border border-border/80 rounded-xl cursor-grab active:cursor-grabbing select-none transition-all ${
+        isFullscreen
+          ? "fixed inset-0 z-[9999] w-screen h-screen rounded-none border-0 bg-slate-950 p-0"
+          : ""
+      }`}
+      style={{ height: isFullscreen ? "100vh" : `${viewHeight}px` }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
     >
-      {/* Interactive Zoom Toolbar */}
-      <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1 bg-slate-900/90 backdrop-blur border border-border/80 p-1.5 rounded-lg shadow-2xl font-mono text-xs select-none">
+      {/* Fullscreen Mode Indicator Badge */}
+      {isFullscreen && (
+        <div className="absolute top-4 left-4 z-30 flex items-center gap-2 bg-slate-900/95 backdrop-blur-md px-3.5 py-1.5 rounded-lg border border-cyan-500/40 text-xs font-mono text-cyan-300 shadow-2xl pointer-events-none">
+          <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+          <span className="font-bold uppercase tracking-wider">Fullscreen Network Graph View</span>
+        </div>
+      )}
+
+      {/* Interactive Zoom & Fullscreen Toolbar */}
+      <div className="absolute bottom-3 right-3 z-30 flex items-center gap-1 bg-slate-900/95 backdrop-blur-md border border-border/80 p-1.5 rounded-lg shadow-2xl font-mono text-xs select-none">
         <button
           type="button"
           onClick={(e) => {
@@ -184,7 +248,33 @@ function GraphViewport({
           className="p-1.5 hover:bg-slate-800 active:bg-slate-700 rounded text-slate-300 hover:text-white transition-colors cursor-pointer"
           title="Reset Zoom & Pan"
         >
-          <Maximize2 className="w-3.5 h-3.5" />
+          <RotateCcw className="w-3.5 h-3.5" />
+        </button>
+        <div className="w-px h-4 bg-border/60 mx-1" />
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFullscreen();
+          }}
+          className={`flex items-center gap-1.5 px-2 py-1 rounded transition-colors cursor-pointer text-xs font-semibold ${
+            isFullscreen
+              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30"
+              : "text-slate-300 hover:text-white hover:bg-slate-800"
+          }`}
+          title={isFullscreen ? "Exit Fullscreen (Esc)" : "Toggle Global Fullscreen"}
+        >
+          {isFullscreen ? (
+            <>
+              <Minimize2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden sm:inline text-[11px]">Exit Fullscreen</span>
+            </>
+          ) : (
+            <>
+              <Maximize2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="hidden sm:inline text-[11px]">Fullscreen</span>
+            </>
+          )}
         </button>
       </div>
 
