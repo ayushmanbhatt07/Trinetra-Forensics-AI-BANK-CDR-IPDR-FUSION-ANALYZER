@@ -108,6 +108,7 @@ def _compute(bundle: dict) -> dict:
     # These engines only need `bundle` as input. They have no data dependencies
     # on each other and can safely run concurrently.
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from backend import config
 
     g1_results: dict = {
         "behavioural": [], "heat": {"accounts": []}, "ens": {"accounts": [], "detectors": []},
@@ -175,7 +176,7 @@ def _compute(bundle: dict) -> dict:
             logger.warning("[HYBRID] internet_scores failed: %s", e)
             return ("internet", {"txn": {}, "ip": {}})
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=config.max_workers()) as executor:
         futs = [
             executor.submit(_run_behavioural),
             executor.submit(_run_heat),
@@ -233,7 +234,7 @@ def _compute(bundle: dict) -> dict:
         "entity": {"account_exposure": {}, "entities": {}},
         "gfeats": ({}, {})
     }
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=config.max_workers()) as executor:
         futs2 = [
             executor.submit(_run_moneyflow),
             executor.submit(_run_entity),

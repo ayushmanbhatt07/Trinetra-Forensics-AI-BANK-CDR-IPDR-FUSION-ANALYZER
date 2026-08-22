@@ -14,7 +14,7 @@ class PipelineOrchestrator:
     def __init__(self):
         self._lock = threading.Lock()
         # Single bounded executor to prevent spawning multiple threads or processing simultaneously.
-        self._executor = ThreadPoolExecutor(max_workers=4) # Increased to handle multiple users
+        self._executor = ThreadPoolExecutor(max_workers=1) # Reduced to 1 to prevent concurrency OOM on VPS
         self._active_jobs = {} # Map username to active job
 
     def _get_or_load_active_job(self, username: str) -> dict | None:
@@ -188,40 +188,33 @@ class PipelineOrchestrator:
                 "stage": "FUSING",
                 "progress": 25
             })
-            _log.info(f"[PIPELINE] user={username} job={job_id} stage=FUSING (Starting concurrent Fusion & Scoring)")
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=FUSING (Starting sequential Fusion & Scoring)")
             
-            from concurrent.futures import ThreadPoolExecutor
+            # Step 1: Run Fusion sequentially
+            cached_fused_base(bundle)
+            cached_build_timeline(bundle)
             
-            def _run_fusion():
-                cached_fused_base(bundle)
-                cached_build_timeline(bundle)
+            import gc
+            gc.collect() # Clean up parsing/fusion memory
             
-            def _run_scoring():
-                hybrid.hybrid_analyze(bundle)
-                
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                fut_fuse = ex.submit(_run_fusion)
-                fut_score = ex.submit(_run_scoring)
-                
-                # Step 1: Wait for Fusion to finish first (so UI can show fused data)
-                fut_fuse.result()
-                self._update_job(job_id, username, {
-                    "status": "FUSED_READY",
-                    "stage": "FUSED_READY",
-                    "progress": 40,
-                    "fused_ready": True
-                })
-                _log.info(f"[PIPELINE] user={username} job={job_id} stage=FUSED_READY elapsed={time.time() - t0:.2f}s")
-                
-                # Step 2: Now wait for Scoring (which has been running in parallel)
-                self._update_job(job_id, username, {
-                    "status": "SCORING",
-                    "stage": "SCORING",
-                    "progress": 50
-                })
-                _log.info(f"[PIPELINE] user={username} job={job_id} stage=SCORING (waiting for parallel execution)")
-                
-                fut_score.result()
+            self._update_job(job_id, username, {
+                "status": "FUSED_READY",
+                "stage": "FUSED_READY",
+                "progress": 40,
+                "fused_ready": True
+            })
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=FUSED_READY elapsed={time.time() - t0:.2f}s")
+            
+            # Step 2: Run Scoring sequentially
+            self._update_job(job_id, username, {
+                "status": "SCORING",
+                "stage": "SCORING",
+                "progress": 50
+            })
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=SCORING")
+            
+            hybrid.hybrid_analyze(bundle)
+            gc.collect() # Clean up scoring/features memory
             
             self._update_job(job_id, username, {
                 "status": "ANOMALIES_READY",
@@ -242,6 +235,7 @@ class PipelineOrchestrator:
             cached_money_graph(bundle)
             cached_account_phone_graph(bundle)
             cached_phone_call_graph(bundle)
+            gc.collect() # Clean up graph engine memory
             
             # Final Step: Ready
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")

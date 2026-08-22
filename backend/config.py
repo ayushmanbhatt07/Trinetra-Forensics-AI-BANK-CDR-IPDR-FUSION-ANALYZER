@@ -139,8 +139,20 @@ def ingest_timeout_sec() -> int:
     return max(10, _int("INGEST_TIMEOUT_SEC", 120))
 
 
+def max_workers() -> int:
+    """Determine the maximum thread pool workers based on CPU core count or APP_MAX_WORKERS."""
+    env_val = os.environ.get("APP_MAX_WORKERS")
+    if env_val:
+        try:
+            return max(1, int(env_val))
+        except ValueError:
+            pass
+    cpu_cnt = os.cpu_count() or 1
+    return max(1, min(2, cpu_cnt))
+
+
 def parser_threads() -> int:
-    return max(1, _int("PARSER_THREADS", 4))
+    return min(max_workers(), max(1, _int("PARSER_THREADS", 4)))
 
 
 def detect_min_confidence() -> float:

@@ -83,6 +83,7 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
         return out
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from backend import config
 
     def _isolation_forest():
         t0 = time.time()
@@ -196,7 +197,7 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
 
     # Removed _lof, _dbscan, and _hdbscan (O(N^2) distance calculations) for latency optimization
     detectors = [_isolation_forest, _ocsvm, _pca, _zscore]
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=config.max_workers()) as ex:
         futures = [ex.submit(fn) for fn in detectors]
         for future in as_completed(futures):
             try:
