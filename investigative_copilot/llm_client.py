@@ -28,11 +28,17 @@ logger = logging.getLogger(__name__)
 # Primary model: High-accuracy, high-capacity 120B reasoning model
 GROQ_MODEL = "openai/gpt-oss-120b"
 
-# Fallback chain — ordered by high reliability & speed
+# Fallback chain — ordered by high reliability, token limits, and speed
 FALLBACK_MODELS = [
     "openai/gpt-oss-120b",          # High-capacity 120B
-    "openai/gpt-oss-20b",           # 20B
+    "openai/gpt-oss-20b",           # 20B fast model
     "qwen/qwen3.6-27b",             # Qwen Reasoning
+    "groq/compound",                # Groq Compound
+    "groq/compound-mini",           # Groq Compound Mini
+    "allam-2-7b",                   # Fast 7B model
+    "canopylabs/orpheus-v1-english", # Fast English model
+    "llama-3.3-70b-versatile",      # LLaMA 3.3 70B
+    "llama-3.1-8b-instant",         # LLaMA 3.1 8B
 ]
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"

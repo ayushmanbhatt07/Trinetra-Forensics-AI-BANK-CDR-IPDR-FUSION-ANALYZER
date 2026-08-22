@@ -175,19 +175,59 @@ def groq_keys() -> list[str]:
     """All configured Groq API keys, de-duplicated, in fallback order.
 
     Supports rotation to avoid rate limits.
-    Automatically discovers any environment variable starting with GROQ_API_KEY.
+    Automatically discovers:
+      - Any env var starting with GROQ_API_KEY (e.g. GROQ_API_KEY, GROQ_API_KEY_1, GROQ_API_KEY_2...)
+      - Any env var starting with APP_GROQ_API_KEY
+      - GROQ_KEY, GROQ_KEYS, GROQ_API_KEYS (comma or space separated)
+      - OPEN_ROUTER_KEY_*, OPENROUTER_API_KEY, OPENAI_API_KEY
+      - Strips quotes (", '), whitespace, and trailing commas.
+      - Re-checks .env files across all common root and backend paths if empty.
     """
     out = []
 
-    # Collect all keys starting with GROQ_API_KEY and sort them by variable name
-    keys_from_env = sorted(
-        [k for k in os.environ.keys() if k.startswith("GROQ_API_KEY")]
-    )
+    def _extract_from_env():
+        # Check all possible environment variable name patterns
+        for key_name, val in list(os.environ.items()):
+            k_upper = key_name.upper()
+            if (
+                k_upper.startswith("GROQ_API_KEY")
+                or k_upper.startswith("APP_GROQ_API_KEY")
+                or k_upper in ("GROQ_KEY", "GROQ_KEYS", "GROQ_API_KEYS")
+                or k_upper.startswith("OPEN_ROUTER_KEY")
+                or k_upper in ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
+            ):
+                if not val:
+                    continue
+                # Split comma/semicolon/whitespace separated lists
+                parts = [p.strip() for p in re.split(r"[,;\n\r\t]+", str(val)) if p.strip()]
+                for raw in parts:
+                    clean_k = raw.strip("\"'` \t\r\n")
+                    if clean_k and clean_k not in out:
+                        out.append(clean_k)
 
-    for key_name in keys_from_env:
-        val = os.environ.get(key_name, "").strip()
-        if val and val not in out:
-            out.append(val)
+    import re
+    _extract_from_env()
+
+    # If no keys discovered in os.environ yet, try loading all potential .env paths
+    if not out:
+        env_candidates = [
+            Path.cwd() / ".env",
+            Path.cwd() / "backend" / ".env",
+            Path(__file__).resolve().parent / ".env",
+            Path(__file__).resolve().parent.parent / ".env",
+            Path("/app/.env"),
+            Path("/app/backend/.env"),
+            Path("/data/.env"),
+            Path("/data/backend.env"),
+        ]
+        try:
+            from dotenv import load_dotenv
+            for cand in env_candidates:
+                if cand.exists():
+                    load_dotenv(cand, override=False)
+            _extract_from_env()
+        except Exception:
+            pass
 
     return out
 
