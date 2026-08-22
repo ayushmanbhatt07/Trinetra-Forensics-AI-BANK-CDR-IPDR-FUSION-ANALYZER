@@ -14,8 +14,7 @@ __pycache__
 node_modules
 .next
 frontend/
-.env
-.env.*
 *.log
 backend.db
 data/
+

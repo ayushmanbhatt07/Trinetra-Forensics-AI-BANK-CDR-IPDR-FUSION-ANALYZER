@@ -69,6 +69,11 @@ jobs:
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GROQ_API_KEY_1: ${{ secrets.GROQ_API_KEY_1 }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
+          GROQ_API_KEY_4: ${{ secrets.GROQ_API_KEY_4 }}
+          GROQ_API_KEY_5: ${{ secrets.GROQ_API_KEY_5 }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
@@ -76,7 +81,7 @@ jobs:
           port: ${{ secrets.SERVER_PORT || 22 }}
           timeout: 120s
           command_timeout: 30m
-          envs: GHCR_TOKEN,GHCR_USERNAME
+          envs: GHCR_TOKEN,GHCR_USERNAME,GROQ_API_KEY_1,GROQ_API_KEY_2,GROQ_API_KEY_3,GROQ_API_KEY_4,GROQ_API_KEY_5
           script: |
             # Authenticate to GHCR on the server to pull the image
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
@@ -97,8 +102,17 @@ jobs:
             # Ensure the deployment directories and .env exist
             sudo mkdir -p /opt/trinetra/data/cases
             if [ ! -f /opt/trinetra/.env ]; then
-              echo "WARNING: /opt/trinetra/.env not found, creating baseline fallback .env"
               sudo touch /opt/trinetra/.env
+            fi
+            
+            # Automatically inject/update Groq API Keys if provided in GitHub Secrets
+            if [ -n "$GROQ_API_KEY_1" ]; then
+              sudo sed -i '/GROQ_API_KEY/d' /opt/trinetra/.env 2>/dev/null || true
+              [ -n "$GROQ_API_KEY_1" ] && echo "GROQ_API_KEY_1=$GROQ_API_KEY_1" | sudo tee -a /opt/trinetra/.env > /dev/null
+              [ -n "$GROQ_API_KEY_2" ] && echo "GROQ_API_KEY_2=$GROQ_API_KEY_2" | sudo tee -a /opt/trinetra/.env > /dev/null
+              [ -n "$GROQ_API_KEY_3" ] && echo "GROQ_API_KEY_3=$GROQ_API_KEY_3" | sudo tee -a /opt/trinetra/.env > /dev/null
+              [ -n "$GROQ_API_KEY_4" ] && echo "GROQ_API_KEY_4=$GROQ_API_KEY_4" | sudo tee -a /opt/trinetra/.env > /dev/null
+              [ -n "$GROQ_API_KEY_5" ] && echo "GROQ_API_KEY_5=$GROQ_API_KEY_5" | sudo tee -a /opt/trinetra/.env > /dev/null
             fi
             
             # Ensure permissive data directory permissions for container user
