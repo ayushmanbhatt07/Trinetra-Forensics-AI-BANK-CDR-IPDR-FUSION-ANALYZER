@@ -26,6 +26,8 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
+          timeout: 120s
+          command_timeout: 10m
           script: |
             echo "=================================================================="
             echo "Fetching last ${{ inputs.lines }} lines of backend logs..."

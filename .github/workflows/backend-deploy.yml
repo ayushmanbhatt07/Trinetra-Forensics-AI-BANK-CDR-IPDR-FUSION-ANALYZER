@@ -74,6 +74,8 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
+          timeout: 120s
+          command_timeout: 30m
           envs: GHCR_TOKEN,GHCR_USERNAME
           script: |
             # Authenticate to GHCR on the server to pull the image

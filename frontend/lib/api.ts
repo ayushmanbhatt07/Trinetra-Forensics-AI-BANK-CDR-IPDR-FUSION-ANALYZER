@@ -534,6 +534,207 @@ export interface FusedRow {
   ncrp_states?: string[];
 }
 
+export interface DayHourCell {
+  day: string;
+  day_idx: number;
+  hour: number;
+  count: number;
+  amount: number;
+  risk_score: number;
+  intensity: number;
+}
+
+export interface CrossBankCell {
+  sender_bank: string;
+  receiver_bank: string;
+  volume: number;
+  count: number;
+}
+
+export interface TelecomCircleItem {
+  circle: string;
+  calls: number;
+  sessions: number;
+  suspect_nodes: number;
+}
+
+export interface BenfordDigitItem {
+  digit: number;
+  observed_pct: number;
+  expected_pct: number;
+  count: number;
+}
+
+export interface BenfordAnalysis {
+  digits: BenfordDigitItem[];
+  valid_sample_size: number;
+  chi_square_stat: number;
+  status: string;
+  verdict: string;
+}
+
+export interface FiuTypologyItem {
+  rule_code: string;
+  name: string;
+  description: string;
+  count: number;
+  severity: string;
+  regulatory_ref: string;
+  action: string;
+}
+
+export interface ReportIntelligence {
+  generated_at: string;
+  engine: string;
+  executive: {
+    overall_risk_score: number;
+    risk_band: string;
+    entities_analysed: number;
+    suspicious_entities: number;
+    transactions: number;
+    accounts_flagged: number;
+    suspicious_clusters: number;
+    network_density: number;
+    fusion_confidence: number;
+    timeline_coverage: {
+      events: number;
+      span_days: number;
+      start?: string;
+      end?: string;
+    };
+    risk_distribution: {
+      LOW: number;
+      MEDIUM: number;
+      HIGH: number;
+      CRITICAL: number;
+    };
+    total_amount: number;
+    credits: number;
+    debits: number;
+    quick_insights: string[];
+  };
+  heatmaps: {
+    hour_amount: { hour: number; count: number; amount: number; credits: number; debits: number }[];
+    weekday_activity: { day: string; idx: number; count: number; amount: number; credits: number; debits: number }[];
+    day_hour_matrix?: DayHourCell[];
+    cross_bank_matrix?: CrossBankCell[];
+    telecom_circles?: TelecomCircleItem[];
+    amount_distribution: { bucket: string; count: number; amount: number }[];
+    mode_buckets: { mode: string; count: number; amount: number }[];
+    ip_hour: { hour: number; sessions: number; volume: number }[];
+    phone_reuse: { phone: string; accounts: string[]; account_count: number; txns: number }[];
+    shared_device: { imei: string; phones: string[]; phone_count: number; sessions: number }[];
+    shared_ip: { ip: string; phones: string[]; phone_count: number; sessions: number }[];
+    account_risk: { account_no: string; score: number; band: string; txns: number; flags: string[] }[];
+    entity_risk: { entity: string; kind: string; score: number; band: string; records: number }[];
+  };
+  network: {
+    nodes: number;
+    edges: number;
+    density: number;
+    components: number;
+    largest_component: number;
+    isolates: number;
+    avg_path_length: number | null;
+    hubs: { id: string; degree: number; in_degree: number; out_degree: number; betweenness: number; community?: number }[];
+    communities: { id: number; nodes: string[]; size: number }[];
+    clusters: number;
+    money_graph?: any;
+    call_graph?: any;
+  };
+  temporal: {
+    peak_hours: number[];
+    peak_windows: string[];
+    bursts: { start_ts: number; start: string; count: number; slot_min: number }[];
+    histogram: any;
+    rapid_in_out: { account_no: string; in_amount: number; out_amount: number; window_min: number; in_txn?: string; out_txn?: string; in_ts?: number; out_ts?: number }[];
+    rapid_in_out_count: number;
+    coincidence_details: { phone: string; account_no: string; txn_id: string; amount: number; window_count: number; contacts: number; direction: string; mode: string }[];
+    coincidence_count: number;
+    coincidence_window_sec: number;
+    call_txn_overlaps: number;
+    ip_txn_overlaps: number;
+    total_events: number;
+  };
+  ml: {
+    fitted: boolean;
+    flagged: number;
+    method: string;
+    detectors: string[];
+    confidence: number;
+    accounts: any[];
+    feature_importance: { feature: string; raw: string; importance: number }[];
+    top_drift: string[];
+    z_flagged_extra: string[];
+  };
+  circular: {
+    loops: { accounts: string[]; length: number; total_flow: number; min_leg?: number }[];
+    loop_count: number;
+    loop_sizes: number[];
+    total_flow: number;
+    avg_loop_flow: number | null;
+    avg_cycle_duration_sec: number | null;
+    rapid_payouts: { account_no: string; count: number; window_min: number; total: number; start_ts?: number; end_ts?: number; txns: any[] }[];
+    rapid_payout_count: number;
+    rapid_in_out: any[];
+    rapid_in_out_count: number;
+    indicators: { indicator: string; signal: string; severity: string }[];
+  };
+  fusion: {
+    shared_identities: { kind: string; value: string; party_b: string; links: number }[];
+    phone_account_links: number;
+    ip_phone_links: number;
+    device_phone_links: number;
+    call_transaction_links: number;
+    session_transaction_links: number;
+    temporal_overlaps: number;
+    confidence: number;
+    linked_entities: any[];
+    linked_accounts: any[];
+    missing_links: any[];
+  };
+  statistics: {
+    txns: number;
+    histogram: { bucket: string; count: number; amount: number }[];
+    percentiles: Record<string, number>;
+    mean: number;
+    median: number;
+    variance: number;
+    std: number;
+    min: number;
+    max: number;
+    q1: number;
+    q3: number;
+    iqr: number;
+    outlier_thresholds: { lower: number; upper: number };
+    top_senders: { entity: string; txns: number; total: number }[];
+    top_receivers: { entity: string; txns: number; total: number }[];
+    top_beneficiaries: { entity: string; txns: number; total: number }[];
+    mode_buckets: { mode: string; count: number; amount: number }[];
+    benford?: BenfordAnalysis;
+  };
+  recommendations: {
+    priority: string;
+    category: string;
+    action: string;
+    reason: string;
+    entities: string[];
+  }[];
+  datasets: {
+    bank: number;
+    cdr: number;
+    ipdr: number;
+    complaints: number;
+    subscribers: number;
+    entities: number;
+    timeline_events: number;
+    timeline_coverage: any;
+    generated_at: string;
+  };
+  fiu_typologies?: FiuTypologyItem[];
+  benford?: BenfordAnalysis;
+}
+
 export interface FusedPage {
   total: number;
   offset: number;
@@ -867,6 +1068,7 @@ export const api = {
   downloadReport: async (): Promise<void> => {
     await downloadBlob("/report", "STR_Report.pdf");
   },
+  reportsIntelligence: () => request<ReportIntelligence>("/reports/intelligence"),
   transactionReport: async (transactionId: string): Promise<void> => {
     await downloadBlob(
       `/report/transaction/${encodeURIComponent(transactionId)}`,
