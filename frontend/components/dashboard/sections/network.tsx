@@ -133,12 +133,6 @@ function GraphViewport({
     isDragging.current = false;
   };
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 0.1 : -0.1;
-    setZoom((z) => Math.min(3.5, Math.max(0.4, Number((z + delta).toFixed(2)))));
-  };
-
   const resetView = () => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
@@ -152,31 +146,42 @@ function GraphViewport({
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
-      onWheel={handleWheel}
     >
       {/* Interactive Zoom Toolbar */}
-      <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1 bg-slate-900/90 backdrop-blur border border-border/80 p-1 rounded-lg shadow-xl font-mono text-xs">
+      <div className="absolute bottom-3 right-3 z-20 flex items-center gap-1 bg-slate-900/90 backdrop-blur border border-border/80 p-1.5 rounded-lg shadow-2xl font-mono text-xs select-none">
         <button
-          onClick={() => setZoom((z) => Math.min(3.5, z + 0.2))}
-          className="p-1.5 hover:bg-slate-800 rounded text-slate-300 hover:text-white transition-colors"
-          title="Zoom In"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setZoom((z) => Math.min(3.5, Number((z + 0.2).toFixed(2))));
+          }}
+          className="p-1.5 hover:bg-slate-800 active:bg-slate-700 rounded text-slate-300 hover:text-white transition-colors cursor-pointer"
+          title="Zoom In (+)"
         >
           <ZoomIn className="w-4 h-4" />
         </button>
-        <span className="text-[11px] font-bold text-cyan-400 px-1.5 min-w-[42px] text-center">
+        <span className="text-[11px] font-bold text-cyan-400 px-2 min-w-[46px] text-center select-none">
           {Math.round(zoom * 100)}%
         </span>
         <button
-          onClick={() => setZoom((z) => Math.max(0.4, z - 0.2))}
-          className="p-1.5 hover:bg-slate-800 rounded text-slate-300 hover:text-white transition-colors"
-          title="Zoom Out"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setZoom((z) => Math.max(0.4, Number((z - 0.2).toFixed(2))));
+          }}
+          className="p-1.5 hover:bg-slate-800 active:bg-slate-700 rounded text-slate-300 hover:text-white transition-colors cursor-pointer"
+          title="Zoom Out (-)"
         >
           <ZoomOut className="w-4 h-4" />
         </button>
         <div className="w-px h-4 bg-border/60 mx-1" />
         <button
-          onClick={resetView}
-          className="p-1.5 hover:bg-slate-800 rounded text-slate-300 hover:text-white transition-colors"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            resetView();
+          }}
+          className="p-1.5 hover:bg-slate-800 active:bg-slate-700 rounded text-slate-300 hover:text-white transition-colors cursor-pointer"
           title="Reset Zoom & Pan"
         >
           <Maximize2 className="w-3.5 h-3.5" />
