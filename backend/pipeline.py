@@ -171,7 +171,6 @@ def ingest_folder(folder: str, patterns: tuple[str, ...] | None = None,
     files_skipped: list[str] = []
     errors: list[str] = []
 
-    from concurrent.futures import as_completed
     paths_to_parse = []
     for root, dirs, names in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -197,10 +196,6 @@ def ingest_folder(folder: str, patterns: tuple[str, ...] | None = None,
     for fname, path in paths_to_parse:
         try:
             parsed = _parse_one(path)
-        except FTimeout:
-            files_skipped.append(f"{fname} (timeout)")
-            gc.collect()
-            continue
         except SkipFileError as e:
             files_skipped.append(f"{fname} ({e.reason})")
             continue
@@ -210,8 +205,15 @@ def ingest_folder(folder: str, patterns: tuple[str, ...] | None = None,
             else:
                 errors.append(f"{fname}: {str(e)[:200]}")
             continue
+        except TimeoutError:
+            files_skipped.append(f"{fname} (timeout)")
+            gc.collect()
+            continue
         except Exception as e:
-            errors.append(f"{fname}: {str(e)[:200]}")
+            if "timeout" in str(e).lower():
+                files_skipped.append(f"{fname} (timeout)")
+            else:
+                errors.append(f"{fname}: {str(e)[:200]}")
             continue
 
         if parsed["kind"] == "ncrp":

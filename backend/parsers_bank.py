@@ -52,12 +52,24 @@ def _is_amount(tok: str) -> bool:
 
 
 def extract_pdf_lines(path: str) -> list[str]:
-    import pdfplumber
     lines: list[str] = []
+    # Fast path: pdfminer high_level (10x faster than pdfplumber table layout parsing)
     try:
+        from pdfminer.high_level import extract_text as _pm_extract_text
+        raw = _pm_extract_text(path)
+        if raw and len(raw.strip()) >= 50:
+            lines = _sanitize(raw).splitlines()
+            if lines and sum(len(l) for l in lines) >= 50:
+                return lines
+    except Exception:
+        pass
+
+    # Reliable fallback: pdfplumber page-by-page extraction
+    try:
+        import pdfplumber
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages:
-                txt = page.extract_text() or ""
+                txt = page.extract_text(layout=False) or page.extract_text() or ""
                 lines.extend(_sanitize(txt).splitlines())
     except ValueError as e:
         if "password" in str(e).lower():
