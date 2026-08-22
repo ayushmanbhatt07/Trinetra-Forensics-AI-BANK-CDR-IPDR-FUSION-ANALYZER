@@ -4,9 +4,11 @@ import React, { useEffect, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Clock, Banknote, PhoneCall, Globe, ShieldAlert, type LucideIcon } from "lucide-react";
+import { Clock, Banknote, PhoneCall, Globe, ShieldAlert, Search, X, Loader2, type LucideIcon } from "lucide-react";
 import { api, type TimelineEvent } from "@/lib/api";
 import { toast } from "sonner";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
 const KIND_STYLE: Record<string, { label: string; cls: string; icon: LucideIcon }> = {
   bank: { label: "BANK", cls: "bg-emerald-500/10 text-emerald-500 border-emerald-500/30", icon: Banknote },
@@ -24,19 +26,45 @@ export const TimelineSection = React.memo(function TimelineSection() {
   const { isFusedReady } = usePipeline();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [filter, setFilter] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setLoading(true);
     api
       .timeline(5000)
-      .then((res) => setEvents(res.events))
+      .then((res) => setEvents(res?.events || []))
       .catch((e) => {
-        if (e.status !== 409) toast.error("Failed to load timeline.");
+        if (e?.status !== 409) toast.error("Failed to load timeline.");
+        setEvents([]);
       })
       .finally(() => setLoading(false));
   }, [isFusedReady]);
 
-  const shown = filter ? events.filter((e) => e.kind === filter) : events;
+  const shown = React.useMemo(() => {
+    let list = events;
+    if (filter) {
+      list = list.filter((e) => e.kind === filter);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      list = list.filter((e) => 
+        (e.entity || "").toLowerCase().includes(q) ||
+        (e.detail || "").toLowerCase().includes(q) ||
+        (e.label || "").toLowerCase().includes(q) ||
+        (e.date || "").toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [events, filter, searchQuery]);
+
+  const countsByKind = React.useMemo(() => {
+    const counts: Record<string, number> = { bank: 0, cdr: 0, ipdr: 0, complaint: 0 };
+    events.forEach((e) => {
+      if (counts[e.kind] !== undefined) counts[e.kind]++;
+    });
+    return counts;
+  }, [events]);
 
   const [panelPayload, setPanelPayload] = useState<any>(null);
   const dossierCacheRef = useRef<Map<string, any>>(new Map());
@@ -64,36 +92,99 @@ export const TimelineSection = React.memo(function TimelineSection() {
 
   return (
     <div className="space-y-6">
-      <Card>
-        <CardHeader className="flex flex-row items-center gap-2 flex-wrap">
-          <Clock className="h-5 w-5 text-emerald-500" />
-          <CardTitle>Unified Event Timeline</CardTitle>
-          <CardDescription>
-            {loading ? "…" : `${events.length.toLocaleString()} fused events`}
-          </CardDescription>
-          <div className="ml-auto flex gap-2">
-            {[null, "bank", "cdr", "ipdr", "complaint"].map((k) => (
-              <button
-                key={k || "all"}
-                onClick={() => setFilter(k)}
-                className={`px-3 py-1 rounded-full text-xs border transition-colors ${
-                  filter === k
-                    ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-500"
-                    : "border-border text-muted-foreground hover:text-foreground"
-                }`}
+      <Card className="border-border/70 bg-card/60 backdrop-blur shadow-xl">
+        <CardHeader className="flex flex-col gap-4 border-b border-border/60 pb-4">
+          <div className="flex flex-row items-center gap-2 flex-wrap justify-between">
+            <div className="flex items-center gap-2">
+              <Clock className="h-5 w-5 text-emerald-500" />
+              <div>
+                <CardTitle className="text-lg font-bold">Unified Event Timeline</CardTitle>
+                <CardDescription className="text-xs">
+                  {loading ? "Loading events..." : `${shown.length.toLocaleString()} of ${events.length.toLocaleString()} fused temporal events`}
+                </CardDescription>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {[null, "bank", "cdr", "ipdr", "complaint"].map((k) => {
+                const count = k === null ? events.length : countsByKind[k] || 0;
+                return (
+                  <button
+                    key={k || "all"}
+                    onClick={() => setFilter(k)}
+                    className={`px-3 py-1 rounded-full text-xs border font-mono transition-colors flex items-center gap-1.5 ${
+                      filter === k
+                        ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-400 font-semibold"
+                        : "border-border text-muted-foreground hover:text-foreground hover:bg-secondary/40"
+                    }`}
+                  >
+                    <span>{k === null ? "ALL" : k.toUpperCase()}</span>
+                    <span className="text-[10px] opacity-70">({count})</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Fast in-memory search bar */}
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" />
+              <Input
+                type="text"
+                placeholder="Filter timeline by Entity ID, Account, Phone, Details, Timestamp..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 pr-8 h-9 text-xs bg-background/80 border-border/80"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-4" />
+                </button>
+              )}
+            </div>
+            {(filter !== null || searchQuery) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setFilter(null); setSearchQuery(""); }}
+                className="h-9 text-xs text-muted-foreground hover:text-foreground"
               >
-                {k === null ? "ALL" : k.toUpperCase()}
-              </button>
-            ))}
+                Reset
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent className="p-0">
           <ScrollArea className="h-[calc(100vh-20rem)]">
             {loading ? (
-              <div className="p-8 text-center text-muted-foreground animate-pulse">Loading timeline...</div>
+              <div className="p-12 text-center text-muted-foreground">
+                <Loader2 className="mx-auto mb-3 size-7 animate-spin text-emerald-500" />
+                <p className="text-sm animate-pulse font-mono">Synchronizing unified forensic timeline...</p>
+              </div>
+            ) : events.length === 0 ? (
+              <div className="p-12 text-center text-muted-foreground space-y-2">
+                <Clock className="mx-auto size-8 opacity-30 text-emerald-500" />
+                <p className="text-sm font-medium">No events found in dataset.</p>
+                <p className="text-xs text-muted-foreground/60">Upload and fuse bank, CDR, or IPDR files to view unified chronological events.</p>
+              </div>
             ) : shown.length === 0 ? (
-              <div className="p-8 text-center text-muted-foreground">
-                No events. Run the ingestion pipeline first.
+              <div className="p-12 text-center text-muted-foreground space-y-3">
+                <Search className="mx-auto size-8 opacity-30 text-amber-500" />
+                <p className="text-sm font-medium text-foreground">No events match your active filters</p>
+                <p className="text-xs text-muted-foreground/80 max-w-sm mx-auto">
+                  {searchQuery ? `No records found containing "${searchQuery}"` : `No records found in category ${filter?.toUpperCase()}`}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setFilter(null); setSearchQuery(""); }}
+                  className="text-xs"
+                >
+                  Clear All Filters
+                </Button>
               </div>
             ) : (
               <div className="relative">

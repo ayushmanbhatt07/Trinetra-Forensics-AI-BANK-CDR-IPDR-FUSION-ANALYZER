@@ -7,7 +7,7 @@ import {
   Search, Loader2, Hash, Phone, Landmark, CreditCard, FileWarning, Globe, 
   ArrowLeft, ShieldAlert, Activity, Users, Network, Bot, BrainCircuit, 
   FileText, Zap, PlusCircle, Share2, PhoneCall, Clock, ExternalLink, ChevronRight,
-  Smartphone
+  Smartphone, X
 } from "lucide-react";
 import { api, type CopilotQueryResult } from "@/lib/api";
 import { toast } from "sonner";
@@ -87,9 +87,18 @@ export const SearchSection = React.memo(function SearchSection() {
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by Account, Phone, UPI, IMEI, IP, Complaint ID..."
-                className="w-full h-16 pl-14 pr-32 rounded-xl bg-background border border-input text-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/50 shadow-inner transition-all"
+                placeholder="Search by Account, Phone, UPI, IMEI, IP, Complaint ID, or ask in plain English..."
+                className="w-full h-16 pl-14 pr-40 rounded-xl bg-background border border-input text-lg text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary/50 shadow-inner transition-all"
               />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery("")}
+                  className="absolute right-32 text-muted-foreground hover:text-foreground p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
               <button
                 type="submit"
                 disabled={busy || !query.trim()}
@@ -98,6 +107,32 @@ export const SearchSection = React.memo(function SearchSection() {
                 {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : "Analyze"}
               </button>
             </form>
+
+            {/* Quick Entity Type Pills */}
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground font-mono mr-1">Targets:</span>
+              {[
+                { label: "Phone", icon: Phone, example: "Search by phone number" },
+                { label: "Bank Account", icon: Landmark, example: "Search by bank account" },
+                { label: "UPI / VPA", icon: CreditCard, example: "Find accounts sharing UPI" },
+                { label: "IP Address", icon: Globe, example: "Analyze IP sessions" },
+                { label: "IMEI / Device", icon: Smartphone, example: "Show devices linked to account" },
+                { label: "NCRP Complaint", icon: ShieldAlert, example: "Correlate NCRP complaint" },
+              ].map((item, idx) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => setQuery(item.example)}
+                    className="px-2.5 py-1 rounded-full text-xs bg-secondary/50 border border-border hover:border-primary/50 text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1.5"
+                  >
+                    <Icon className="w-3 h-3 text-primary/70" />
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
 
             <div className="mt-8">
               <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4 flex items-center gap-2">

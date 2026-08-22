@@ -202,13 +202,44 @@ export const FusedSection = React.memo(function FusedSection() {
         </div>
       );
     }
+    const hasActiveFilters = Boolean(q || dateStart || dateEnd || minAmount !== "" || maxAmount !== "" || riskBand);
+    if (hasActiveFilters) {
+      return (
+        <div className="p-12 text-center text-muted-foreground space-y-3">
+          <Search className="mx-auto size-8 opacity-30 text-cyan-500" />
+          <p className="text-sm font-medium text-foreground">No transactions match your active filters</p>
+          <p className="text-xs text-muted-foreground/80 max-w-sm mx-auto">
+            {q ? `No records matching "${q}"` : "Try widening your date range or amount thresholds."}
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setQ("");
+              setDateStart("");
+              setDateEnd("");
+              setMinAmount("");
+              setMaxAmount("");
+              setRiskBand("");
+              setOffset(0);
+            }}
+            className="text-xs"
+          >
+            Clear All Filters
+          </Button>
+        </div>
+      );
+    }
+
     return (
       <div className="p-8 text-center text-muted-foreground">
         <Database className="mx-auto mb-3 size-7 opacity-30" />
-        <p className="text-sm">No fused records match the current filters.</p>
+        <p className="text-sm">No fused records in the current dataset.</p>
       </div>
     );
   };
+
+  const hasFilters = Boolean(q || dateStart || dateEnd || minAmount !== "" || maxAmount !== "" || riskBand);
 
   return (
     <div className="space-y-6 h-[calc(100vh-12rem)]">
@@ -234,14 +265,14 @@ export const FusedSection = React.memo(function FusedSection() {
               <Button variant="outline" size="sm" onClick={downloadFusedExport}>
                 <Download className="mr-1 size-4" /> Export XLSX
               </Button>
+              <Button
+                size="sm"
+                className="bg-red-600 text-white hover:bg-red-700"
+                onClick={() => window.dispatchEvent(new CustomEvent("nav:section", { detail: "anomalies" }))}
+              >
+                <ShieldAlert className="mr-1 size-4" /> Show Anomalies
+              </Button>
             </div>
-            <Button
-              size="sm"
-              className="bg-red-600 text-white hover:bg-red-700"
-              onClick={() => window.dispatchEvent(new CustomEvent("nav:section", { detail: "anomalies" }))}
-            >
-              <ShieldAlert className="mr-1 size-4" /> Show Anomalies
-            </Button>
           </div>
         </div>
 
@@ -254,11 +285,19 @@ export const FusedSection = React.memo(function FusedSection() {
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}
-              className="pl-8 h-9 text-sm"
+              className="pl-8 pr-8 h-9 text-sm"
               placeholder="Search Name, Account, Txn ID, Phone..."
               value={q}
               onChange={(e) => { setQ(e.target.value); setOffset(0); }}
             />
+            {q && (
+              <button
+                onClick={() => { setQ(""); setOffset(0); }}
+                className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-1">
             <Input
@@ -310,9 +349,24 @@ export const FusedSection = React.memo(function FusedSection() {
             <option value="low">Low</option>
             <option value="safe">Safe</option>
           </select>
-          <Button size="sm" variant="secondary" onClick={() => { setOffset(0); setFusedKey((k) => k + 1); }} className="h-9">
-            Apply Filter
-          </Button>
+          {hasFilters && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setQ("");
+                setDateStart("");
+                setDateEnd("");
+                setMinAmount("");
+                setMaxAmount("");
+                setRiskBand("");
+                setOffset(0);
+              }}
+              className="h-9 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Reset
+            </Button>
+          )}
         </div>
 
         <div className="flex-1 overflow-auto relative">

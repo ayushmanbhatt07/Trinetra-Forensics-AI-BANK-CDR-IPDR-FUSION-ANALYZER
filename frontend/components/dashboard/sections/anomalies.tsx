@@ -222,18 +222,35 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const filteredAlerts = alerts.filter((a) => {
-    if (!searchQuery) return true;
-    const q = searchQuery.toLowerCase();
-    const nameStr = String(a.customer_name || (a as any).account_name || (a as any).counterparty_name || (a as any).holder || "");
-    const phoneStr = String(a.customer_phone || "");
-    return (
-      (a.transaction_id || "").toLowerCase().includes(q) ||
-      (a.sender_customer_id || "").toLowerCase().includes(q) ||
-      nameStr.toLowerCase().includes(q) ||
-      phoneStr.toLowerCase().includes(q)
-    );
-  });
+  const [riskFilter, setRiskFilter] = useState<string>("ALL");
+
+  const filteredAlerts = React.useMemo(() => {
+    let list = alerts;
+    if (riskFilter !== "ALL") {
+      if (riskFilter === "CRITICAL") list = list.filter((a) => (Number(a.risk_score) || 0) >= 86);
+      else if (riskFilter === "HIGH") list = list.filter((a) => (Number(a.risk_score) || 0) >= 71 && (Number(a.risk_score) || 0) < 86);
+      else if (riskFilter === "ELEVATED") list = list.filter((a) => (Number(a.risk_score) || 0) >= 51 && (Number(a.risk_score) || 0) < 71);
+      else if (riskFilter === "MEDIUM") list = list.filter((a) => (Number(a.risk_score) || 0) < 51);
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      list = list.filter((a) => {
+        const nameStr = String(a.customer_name || (a as any).account_name || (a as any).counterparty_name || (a as any).holder || "");
+        const phoneStr = String(a.customer_phone || "");
+        const bankStr = String(a.bank || (a as any).counterparty_bank || "");
+        const modeStr = String(a.mode || "");
+        return (
+          (a.transaction_id || "").toLowerCase().includes(q) ||
+          (a.sender_customer_id || "").toLowerCase().includes(q) ||
+          nameStr.toLowerCase().includes(q) ||
+          phoneStr.toLowerCase().includes(q) ||
+          bankStr.toLowerCase().includes(q) ||
+          modeStr.toLowerCase().includes(q)
+        );
+      });
+    }
+    return list;
+  }, [alerts, riskFilter, searchQuery]);
 
   const exportAlertsExcel = async () => {
     const t = toast.loading("Preparing Excel Export...");
@@ -280,6 +297,27 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
         </div>
       );
     }
+
+    if (alerts.length > 0 && filteredAlerts.length === 0) {
+      return (
+        <div className="p-12 text-center text-muted-foreground space-y-3">
+          <Search className="mx-auto size-8 opacity-30 text-amber-500" />
+          <p className="text-sm font-medium text-foreground">No anomalies match your active filters</p>
+          <p className="text-xs text-muted-foreground/80 max-w-sm mx-auto">
+            {searchQuery ? `No alerts found containing "${searchQuery}"` : `No alerts found with risk level ${riskFilter}`}
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { setRiskFilter("ALL"); setSearchQuery(""); }}
+            className="text-xs"
+          >
+            Clear Filters
+          </Button>
+        </div>
+      );
+    }
+
     return (
       <div className="p-8 text-center text-muted-foreground">
         <ShieldAlert className="mx-auto mb-3 size-7 opacity-30" />
@@ -294,22 +332,64 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
       <div className="flex h-full flex-col rounded-xl border border-border/70 bg-card/60 backdrop-blur">
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
           <ShieldAlert className="size-5 text-red-500" />
-          <div className="min-w-[200px] flex-1">
+          <div className="min-w-[180px] flex-1">
             <p className="text-sm font-semibold text-red-500">Anomaly Detection Feed</p>
             <p className="text-xs text-muted-foreground">
-              {filteredAlerts.length} highest-risk transactions · click a row for full explainability + STR
+              {filteredAlerts.length} of {alerts.length} high-risk transactions
             </p>
           </div>
+
+          {/* Quick Risk Band Filter Buttons */}
+          <div className="flex items-center gap-1.5 bg-secondary/30 p-1 rounded-lg border border-border/40">
+            {["ALL", "CRITICAL", "HIGH", "ELEVATED"].map((band) => (
+              <button
+                key={band}
+                onClick={() => setRiskFilter(band)}
+                className={`px-2.5 py-1 rounded text-xs font-mono transition-colors ${
+                  riskFilter === band
+                    ? band === "CRITICAL"
+                      ? "bg-rose-500/20 text-rose-400 font-bold border border-rose-500/50"
+                      : band === "HIGH"
+                      ? "bg-orange-500/20 text-orange-400 font-bold border border-orange-500/50"
+                      : band === "ELEVATED"
+                      ? "bg-yellow-500/20 text-yellow-400 font-bold border border-yellow-500/50"
+                      : "bg-primary/20 text-primary font-bold border border-primary/50"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {band}
+              </button>
+            ))}
+          </div>
+
           <div className="flex items-center gap-2">
             <div className="relative w-64 max-w-sm">
               <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
               <Input
                 placeholder="Search Txn ID, Name, Phone..."
-                className="pl-9 h-9 bg-background/50 text-xs"
+                className="pl-9 pr-8 h-9 bg-background/50 text-xs"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-4" />
+                </button>
+              )}
             </div>
+            {(riskFilter !== "ALL" || searchQuery) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setRiskFilter("ALL"); setSearchQuery(""); }}
+                className="h-9 text-xs text-muted-foreground hover:text-foreground px-2"
+              >
+                Reset
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={exportAlertsExcel}>
               <Download className="mr-1 size-4" /> Export XLSX
             </Button>
