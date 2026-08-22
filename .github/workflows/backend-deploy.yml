@@ -145,6 +145,14 @@ jobs:
             if [ "$HEALTHY" = true ]; then
               echo "Deployment successful! Container is healthy and responding."
               docker ps --filter "name=trinetra-backend"
+              
+              # Automated Server Cleanup: Purge all old images, dangling layers, and build cache
+              echo "Executing automated post-deploy disk cleanup..."
+              docker image prune -a -f || true
+              docker builder prune -a -f || true
+              sudo rm -rf /tmp/backend_upload_* /tmp/trinetra_* 2>/dev/null || true
+              echo "Server disk cleanup complete. Current disk usage:"
+              df -h /
               exit 0
             else
               echo "================ CONTAINER LOGS (STARTUP FAILURE) ================"
