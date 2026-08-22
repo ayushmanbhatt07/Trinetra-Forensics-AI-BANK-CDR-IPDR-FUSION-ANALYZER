@@ -503,6 +503,11 @@ def parse_bank_csv(path: str) -> dict:
                 debit = amt
             elif typ in ("CR", "C", "CREDIT"):
                 credit = amt
+            elif amt is not None:
+                if amt >= 0:
+                    credit = amt
+                else:
+                    debit = abs(amt)
         if debit is None and credit is None:
             continue
         rec = {

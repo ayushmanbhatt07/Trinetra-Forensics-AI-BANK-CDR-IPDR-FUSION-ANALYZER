@@ -383,9 +383,21 @@ export function OmniWidget() {
                   <div key={i} className="self-start w-full space-y-2">
                     <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
                       <BrainCircuit className="size-3.5 text-cyan-500" />
-                      {res.mode ?? "sql"} · {res.llm_provider ?? "deterministic"}
+                      {res.mode === "deterministic_fallback" ? (
+                        <span className="text-amber-400 font-bold">⚠️ DEGRADED MODE (DETERMINISTIC FALLBACK)</span>
+                      ) : (
+                        <span>
+                          {res.mode ?? "sql"} · {res.llm_provider || "groq"}
+                          {res.llm_model ? ` (${res.llm_model.split("/").pop()})` : ""}
+                        </span>
+                      )}
                       {res.llm_latency_ms ? ` · ${(res.llm_latency_ms / 1000).toFixed(1)}s` : ""}
                     </div>
+                    {res.mode === "deterministic_fallback" && (
+                      <div className="rounded-lg border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs text-amber-300 font-mono flex items-center gap-2 shadow-sm">
+                        <span>⚠️ AI Co-Pilot operating in deterministic fallback mode. All configured LLM providers/models are currently unavailable.</span>
+                      </div>
+                    )}
                     <div className="w-full rounded-xl border border-border/70 bg-background/60 p-4 text-sm leading-relaxed space-y-3 shadow-inner">
                       <div className="space-y-2 text-foreground/90 font-sans">
                         <ReactMarkdown

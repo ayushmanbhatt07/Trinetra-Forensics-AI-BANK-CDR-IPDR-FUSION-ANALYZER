@@ -1,4 +1,5 @@
-import { redirect } from "next/navigation";
-export default function Page() {
-  redirect("/dashboard");
+import { ReportsSection } from "@/components/dashboard/sections/reports";
+
+export default function ReportsPage() {
+  return <ReportsSection />;
 }

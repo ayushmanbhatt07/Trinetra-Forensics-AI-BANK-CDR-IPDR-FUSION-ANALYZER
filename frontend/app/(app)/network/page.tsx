@@ -1,4 +1,5 @@
-import { redirect } from "next/navigation";
-export default function Page() {
-  redirect("/dashboard");
+import { NetworkSection } from "@/components/dashboard/sections/network";
+
+export default function NetworkPage() {
+  return <NetworkSection />;
 }

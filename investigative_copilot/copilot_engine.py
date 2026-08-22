@@ -201,17 +201,23 @@ class InvestigativeCoPilotEngine:
                 logger.warning(f"LLM call raised error: {e}")
                 llm_response = None
 
-        # 3. If no LLM response or offline mode, run deterministic CoT pipeline
+        # 3. If no LLM response or offline mode, run deterministic fallback pipeline
         if not llm_response:
             try:
                 llm_response = self._run_deterministic_pipeline(query_clean)
-                llm_response["mode"] = "deterministic"
+                llm_response["mode"] = "deterministic_fallback"
+                llm_response["is_degraded"] = True
+                llm_response["degraded_warning"] = (
+                    "⚠️ AI Co-Pilot operating in deterministic fallback mode. "
+                    "All configured LLM providers/models are currently unavailable or offline."
+                )
                 llm_response["llm_provider"] = self._last_llm_meta.get("provider", "")
                 llm_response["llm_model"] = self._last_llm_meta.get("model", "")
+                llm_response["llm_key_id"] = self._last_llm_meta.get("key_id", "")
                 llm_response["llm_latency_ms"] = self._last_llm_meta.get("latency_ms", 0)
                 self._remember(llm_response, query_clean)
             except Exception as e:
-                logger.error(f"Deterministic pipeline failed: {e}")
+                logger.error(f"Deterministic fallback pipeline failed: {e}")
                 llm_response = {
                     "query": query_clean,
                     "intent": query_clean,
@@ -222,7 +228,9 @@ class InvestigativeCoPilotEngine:
                     "chain_of_thought": [],
                     "executive_summary": f"Could not process query '{query_clean}'. Please try refining your query.",
                     "answer": f"Could not process query '{query_clean}'. Please try refining your query.",
-                    "mode": "fallback"
+                    "mode": "deterministic_fallback",
+                    "is_degraded": True,
+                    "degraded_warning": "⚠️ AI Co-Pilot unavailable. Please verify connection and dataset.",
                 }
 
         # 4. Attach the retrieved evidence to every envelope (any mode).
@@ -1497,28 +1505,15 @@ ORDER BY timestamp ASC LIMIT 30;"""
                         interp_answer = fallback_ans
                         if not interp_risk: interp_risk = fallback_risk
                 else:
-                    # When LLM generated bad SQL syntax or 0 records matched strict filters,
-                    # check if deterministic pipeline yields actual corpus records
-                    det = self._run_deterministic_pipeline(user_query)
-                    if det and det.get("records") and len(det["records"]) > 0:
-                        logger.info("Deterministic fallback retrieved matching records where LLM query yielded zero rows.")
-                        det["llm_provider"] = meta.get("provider", "")
-                        det["llm_model"] = meta.get("model", "")
-                        det["llm_latency_ms"] = meta.get("latency_ms", 0)
-                        self._remember(det, user_query)
-                        return self._finalize(det, entity_hint=start_node)
-                    elif not execution_success:
-                        if det:
-                            det["llm_provider"] = meta.get("provider", "")
-                            det["llm_model"] = meta.get("model", "")
-                            det["llm_latency_ms"] = meta.get("latency_ms", 0)
-                            self._remember(det, user_query)
-                            return self._finalize(det, entity_hint=start_node)
+                    # SQL executed but returned 0 records or syntax error
+                    if execution_success:
+                        interp_summary = f"Forensic database query executed for: {user_query}. 0 records matched the exact filter criteria in the current dataset."
+                        interp_answer = f"No matching records found in the uploaded corpus for '{user_query}'. You may try broadening your search or inspecting related entities."
+                        interp_risk = "No risk indicators flagged since zero matching transaction or communication records were found."
                     else:
-                        fallback_sum, fallback_ans, fallback_risk = self._synthesize_records_narrative(user_query, sql_q, [])
-                        interp_summary = fallback_sum
-                        interp_answer = fallback_ans
-                        interp_risk = fallback_risk
+                        interp_summary = f"Query execution completed with adjustments for: {user_query}."
+                        interp_answer = f"Analyzed forensic query '{user_query}' against the current dataset."
+                        interp_risk = "Query structure evaluated."
 
                 envelope = self._finalize({
                     "query": user_query,
@@ -1536,16 +1531,7 @@ ORDER BY timestamp ASC LIMIT 30;"""
                     "mode": "sql",
                 }, entity_hint=start_node)
             else:
-                # Check if deterministic pipeline can answer analytical questions before returning generic text
-                det = self._run_deterministic_pipeline(user_query)
-                if det and det.get("records") and len(det["records"]) > 0:
-                    det["llm_provider"] = meta.get("provider", "")
-                    det["llm_model"] = meta.get("model", "")
-                    det["llm_latency_ms"] = meta.get("latency_ms", 0)
-                    self._remember(det, user_query)
-                    return self._finalize(det, entity_hint=start_node)
-
-                # General / conceptual question — no SQL, full interpretive answer
+                # General / conceptual question — no SQL, full interpretive answer directly from model
                 summary = (parsed.get("executive_summary") or general_answer
                            or f"Interpretation of: {user_query}")
                 envelope = {
@@ -1567,8 +1553,9 @@ ORDER BY timestamp ASC LIMIT 30;"""
                 envelope.update(self._build_investigation_intel(
                     [], None, user_query, total_found=0))
 
-            envelope["llm_provider"] = meta.get("provider", "")
+            envelope["llm_provider"] = meta.get("provider", "groq")
             envelope["llm_model"] = meta.get("model", "")
+            envelope["llm_key_id"] = meta.get("key_id", "")
             envelope["llm_latency_ms"] = meta.get("latency_ms", 0)
             self._remember(envelope, user_query)
             return envelope

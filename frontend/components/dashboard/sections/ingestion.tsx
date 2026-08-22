@@ -8,9 +8,11 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { api } from "@/lib/api";
+import { useRouter } from "next/navigation";
 import { usePipeline } from "@/lib/pipeline-context";
 
 export const IngestionSection = React.memo(function IngestionSection() {
+  const router = useRouter();
   const [files, setFiles] = useState<File[]>([]);
   const [folder, setFolder] = useState("");
   const [isUploading, setIsUploading] = useState(false);
@@ -36,13 +38,13 @@ export const IngestionSection = React.memo(function IngestionSection() {
     setIsUploading(true);
     try {
       const data = await api.uploadFiles(files);
-      toast.success(`Fusion Complete! Scored ${data.files.length} datasets (${data.bank} bank, ${data.cdr} CDR, ${data.ipdr} IPDR records, ${data.complaints} complaints).`);
-      if (data.errors.length > 0) {
+      toast.success(data.detail || `Files uploaded successfully! Forensics pipeline initiated for ${files.length} datasets.`);
+      if (data.errors && data.errors.length > 0) {
         toast.error(`Skipped ${data.skipped.length} files · errors: ${data.errors.join("; ").slice(0, 200)}`);
       }
       setFiles([]);
       refetchPipeline();
-      window.dispatchEvent(new CustomEvent("nav:section", { detail: "fused" }));
+      router.push("/fused");
     } catch (error) {
       toast.error(`Error: ${error instanceof Error ? error.message : "Upload failed"}`);
     } finally {
@@ -61,7 +63,7 @@ export const IngestionSection = React.memo(function IngestionSection() {
       toast.success(`Folder ingested: ${data.files_ok} files ok`);
       if (data.errors.length) toast.error(`Errors: ${data.errors.slice(0, 3).join("; ")}`);
       refetchPipeline();
-      window.dispatchEvent(new CustomEvent("nav:section", { detail: "fused" }));
+      router.push("/fused");
     } catch (error) {
       toast.error(`Error: ${error instanceof Error ? error.message : "Folder ingest failed"}`);
     } finally {

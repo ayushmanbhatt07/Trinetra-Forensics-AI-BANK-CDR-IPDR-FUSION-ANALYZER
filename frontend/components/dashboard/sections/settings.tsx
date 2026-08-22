@@ -7,9 +7,11 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Server, Database, Trash2, RefreshCw, Loader2 } from "lucide-react";
 import { api, type IngestStatus } from "@/lib/api";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 export const SettingsSection = React.memo(function SettingsSection() {
+  const router = useRouter();
   const [status, setStatus] = useState<IngestStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [clearing, setClearing] = useState(false);
@@ -30,7 +32,7 @@ export const SettingsSection = React.memo(function SettingsSection() {
       await api.clearData();
       toast.success("Dataset cleared. Navigating to Ingestion to load new data.");
       load();
-      window.dispatchEvent(new CustomEvent("nav:section", { detail: "ingestion" }));
+      router.push("/ingestion");
     } catch {
       toast.error("Failed to clear data.");
     } finally {

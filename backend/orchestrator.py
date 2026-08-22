@@ -36,8 +36,37 @@ class PipelineOrchestrator:
             
         return self._active_jobs[username]
 
+    def start_ingest_pipeline(self, folder_path: str, username: str, cleanup_after: bool = False) -> dict:
+        """Initialize an asynchronous ingestion job from a folder path, persist it, and run parsing + fusion in background."""
+        with self._lock:
+            active_job = self._get_or_load_active_job(username)
+            if active_job and active_job["status"] not in ("READY", "ERROR", "CANCELLED"):
+                return active_job
+
+            dataset_id = str(uuid.uuid4())
+            job_id = f"job-{dataset_id}"
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            job = {
+                "job_id": job_id,
+                "dataset_id": dataset_id,
+                "status": "PARSING",
+                "stage": "PARSING",
+                "progress": 5,
+                "started_at": now,
+                "updated_at": now,
+                "completed_at": None,
+                "error_message": None,
+                "fused_ready": False,
+                "anomalies_ready": False,
+                "graphs_ready": False
+            }
+            self._active_jobs[username] = job
+            store.save_pipeline_job(job, username)
+            self._executor.submit(self._run_ingest_and_pipeline, folder_path, job_id, username, cleanup_after)
+            return job
+
     def start_pipeline(self, bundle: dict, username: str) -> dict:
-        """Initialize the pipeline job, persist it, and submit the background task."""
+        """Initialize the pipeline job for an in-memory bundle, persist it, and submit the background task."""
         with self._lock:
             active_job = self._get_or_load_active_job(username)
             # Check if there's already an active job running to prevent concurrent dupes
@@ -50,9 +79,9 @@ class PipelineOrchestrator:
             job = {
                 "job_id": job_id,
                 "dataset_id": dataset_id,
-                "status": "PARSING",
-                "stage": "PARSING",
-                "progress": 10,
+                "status": "FUSING",
+                "stage": "FUSING",
+                "progress": 20,
                 "started_at": now,
                 "updated_at": now,
                 "completed_at": None,
@@ -257,5 +286,56 @@ class PipelineOrchestrator:
                 "error_message": str(e),
                 "completed_at": now
             })
+
+    def _run_ingest_and_pipeline(self, folder_path: str, job_id: str, username: str, cleanup_after: bool = False):
+        """Asynchronously parses uploaded files, initializes state, and executes the full fusion & scoring pipeline."""
+        t0 = time.time()
+        import shutil
+        import sys
+        try:
+            self._update_job(job_id, username, {
+                "status": "PARSING",
+                "stage": "PARSING",
+                "progress": 10
+            })
+            _log.info(f"[PIPELINE] user={username} job={job_id} stage=PARSING folder={folder_path}")
+
+            from backend.pipeline import ingest_folder
+            bundle = ingest_folder(folder_path)
+
+            # Store bundle in memory state
+            from backend import api
+            with api._lock:
+                if username not in api._state:
+                    api._state[username] = {}
+                api._state[username]["bundle"] = bundle
+
+            # Persist bundle to database
+            store.save_bundle(bundle, username)
+
+            # Inform copilot memory engine
+            from investigative_copilot import router as copilot_router
+            copilot_router.learn_bundle(bundle, username)
+
+            _log.info(f"[PIPELINE] user={username} job={job_id} parsing complete: {len(bundle.get('bank', []))} bank, {len(bundle.get('cdr', []))} cdr, {len(bundle.get('ipdr', []))} ipdr records in {time.time() - t0:.2f}s")
+
+            # Run subsequent stages (FUSION -> SCORING -> GRAPHS -> READY)
+            self._run_pipeline(bundle, job_id, username)
+
+        except Exception as e:
+            _log.exception(f"[PIPELINE] user={username} job={job_id} INGEST ERROR: {e}")
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._update_job(job_id, username, {
+                "status": "ERROR",
+                "stage": "ERROR",
+                "error_message": str(e),
+                "completed_at": now
+            })
+        finally:
+            if cleanup_after:
+                try:
+                    shutil.rmtree(folder_path, ignore_errors=True)
+                except Exception:
+                    pass
 
 orchestrator = PipelineOrchestrator()

@@ -1,4 +1,5 @@
-import { redirect } from "next/navigation";
-export default function Page() {
-  redirect("/dashboard");
+import { AnomaliesSection } from "@/components/dashboard/sections/anomalies";
+
+export default function AnomaliesPage() {
+  return <AnomaliesSection />;
 }

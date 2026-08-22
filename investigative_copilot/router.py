@@ -180,10 +180,14 @@ def process_investigative_query(payload: QueryRequest,
     except Exception as e:
         logger.error(f"Error processing copilot query: {e}", exc_info=True)
 
-    # Fallback to direct deterministic synthesis if anything failed
+    # Fallback to direct deterministic synthesis only if runtime engine failed
     try:
         engine = get_engine(user["username"])
-        return engine._run_deterministic_pipeline(payload.query)
+        res = engine._run_deterministic_pipeline(payload.query)
+        res["mode"] = "deterministic_fallback"
+        res["is_degraded"] = True
+        res["degraded_warning"] = "⚠️ AI Co-Pilot operating in deterministic fallback mode due to engine failure."
+        return res
     except Exception as e2:
         logger.error(f"Final fallback failed: {e2}")
         return {
@@ -199,7 +203,9 @@ def process_investigative_query(payload: QueryRequest,
             ],
             "executive_summary": f"Could not complete query for '{payload.query}'. Please verify entity IDs.",
             "answer": f"Forensic search for **'{payload.query}'** completed. No matching records identified.",
-            "mode": "fallback"
+            "mode": "deterministic_fallback",
+            "is_degraded": True,
+            "degraded_warning": "⚠️ AI Co-Pilot unavailable.",
         }
 
 

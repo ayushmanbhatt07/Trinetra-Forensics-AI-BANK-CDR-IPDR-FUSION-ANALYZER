@@ -23,6 +23,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
 import { api, type Alert, isPipelineNotReady } from "@/lib/api";
+import { useRouter } from "next/navigation";
 import { usePipeline } from "@/lib/pipeline-context";
 
 const riskStyle = (score: number) => {
@@ -70,6 +71,7 @@ const getRulesList = (rules: unknown): string[] => {
 };
 
 export const AnomaliesSection = React.memo(function AnomaliesSection() {
+  const router = useRouter();
   const [alerts, setAlerts] = useState<Alert[]>(() => globalAlertsCache?.alerts || []);
   const [searchQuery, setSearchQuery] = useState("");
   const [alertsLoading, setAlertsLoading] = useState<boolean>(false);
@@ -130,7 +132,7 @@ export const AnomaliesSection = React.memo(function AnomaliesSection() {
       sessionStorage.setItem("network_selected_entities", JSON.stringify(selectedIds));
     } catch (e) {}
     window.dispatchEvent(new CustomEvent("nav:network_filter", { detail: { selectedIds } }));
-    window.dispatchEvent(new CustomEvent("nav:section", { detail: "network" }));
+    router.push("/network");
     toast.success(`Opening cross-bank network graph for ${selectedIds.length} selected transactions.`);
   };
 

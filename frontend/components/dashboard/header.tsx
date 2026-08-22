@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { cn } from "@/lib/utils";
-import type { Section } from "@/app/(app)/dashboard/page";
+export type Section = "dashboard" | "ingestion" | "network" | "fused" | "anomalies" | "timeline" | "reports" | "settings" | "search";
 import { LogOut, Settings } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 
@@ -15,7 +15,7 @@ interface HeaderProps {
 }
 
 const sectionTitles: Record<Section, string> = {
-  overview: "Overview",
+  dashboard: "Overview",
   ingestion: "Data Ingestion",
   network: "Network Graph",
   fused: "Fused Transactions",

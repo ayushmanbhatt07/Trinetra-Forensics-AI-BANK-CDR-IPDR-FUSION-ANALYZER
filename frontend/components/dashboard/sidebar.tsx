@@ -3,7 +3,7 @@
 import React from "react";
 
 import { cn } from "@/lib/utils";
-import type { Section } from "@/app/(app)/dashboard/page";
+import type { Section } from "@/components/dashboard/header";
 import {
   LayoutDashboard,
   FileUp,
@@ -26,7 +26,7 @@ interface SidebarProps {
 }
 
 const navItems: { id: Section; label: string; icon: React.ElementType }[] = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "dashboard", label: "Overview", icon: LayoutDashboard },
   { id: "ingestion", label: "Data Ingestion", icon: FileUp },
   { id: "network", label: "Network Graph", icon: Network },
   { id: "fused", label: "Fused Transactions", icon: Database },

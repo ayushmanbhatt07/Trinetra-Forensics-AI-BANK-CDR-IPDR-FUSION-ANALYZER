@@ -1,4 +1,5 @@
-import { redirect } from "next/navigation";
-export default function Page() {
-  redirect("/dashboard");
+import { TimelineSection } from "@/components/dashboard/sections/timeline";
+
+export default function TimelinePage() {
+  return <TimelineSection />;
 }

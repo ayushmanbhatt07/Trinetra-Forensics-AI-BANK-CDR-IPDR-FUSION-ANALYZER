@@ -883,7 +883,7 @@ export interface CopilotQueryResult {
   insights: CopilotInsight[];
   suggestions: CopilotSuggestion[];
   explanation: string[];
-  mode?: "sql" | "general" | "deterministic";
+  mode?: "sql" | "general" | "deterministic" | "deterministic_fallback" | string;
   llm_provider?: string;
   llm_model?: string;
   llm_latency_ms?: number;

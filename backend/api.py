@@ -982,32 +982,27 @@ async def upload_parse_multi(files: list[UploadFile] = File(...),
     names: list[str] = []
     for f in files:
         name = os.path.basename(f.filename or "upload")
-        with open(os.path.join(tmp, name), "wb") as fh:
+        dest_path = os.path.join(tmp, name)
+        with open(dest_path, "wb") as fh:
             fh.write(await f.read())
         names.append(name)
-    _log.info("uploading %d files -> %s", len(names), tmp)
+    _log.info("upload received: %d files -> staging in %s", len(names), tmp)
     username = user["username"]
-    def _do_ingest():
-        with _lock:
-            if username not in _state:
-                _state[username] = {}
-            _state[username]["bundle"] = ingest_folder(tmp)
-            _persist(username)
-            
-    from fastapi.concurrency import run_in_threadpool
-    await run_in_threadpool(_do_ingest)
-    
-    orchestrator.start_pipeline(_state[username]["bundle"], username)
-    b = _state[username]["bundle"]
-    copilot_router.learn_bundle(b, username)
+
+    # Start background ingestion and processing pipeline
+    job = orchestrator.start_ingest_pipeline(tmp, username, cleanup_after=True)
     return {
-        "detail": "fusion complete",
-        "files": [{"name": n} for n in b["files"]["ok"]]
-                 or [{"name": n} for n in names],
-        "skipped": b["files"]["skipped"],
-        "errors": b["files"]["errors"],
-        "bank": len(b["bank"]), "cdr": len(b["cdr"]), "ipdr": len(b["ipdr"]),
-        "complaints": len(b["complaints"]),
+        "detail": "Upload accepted; background fusion pipeline initiated.",
+        "job_id": job.get("job_id"),
+        "dataset_id": job.get("dataset_id"),
+        "status": job.get("status", "PARSING"),
+        "files": [{"name": n} for n in names],
+        "skipped": [],
+        "errors": [],
+        "bank": 0,
+        "cdr": 0,
+        "ipdr": 0,
+        "complaints": 0,
     }
 
 

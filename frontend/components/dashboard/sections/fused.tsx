@@ -28,6 +28,7 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { InvestigationPanel } from "@/components/dashboard/investigation-panel";
 import { api, type FusedRow, isPipelineNotReady } from "@/lib/api";
+import { useRouter } from "next/navigation";
 import { usePipeline } from "@/lib/pipeline-context";
 
 const PAGE_SIZE = 50;
@@ -41,6 +42,7 @@ const riskStyle = (score: number) => {
 };
 
 export const FusedSection = React.memo(function FusedSection() {
+  const router = useRouter();
   const [rows, setRows] = useState<FusedRow[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -268,7 +270,7 @@ export const FusedSection = React.memo(function FusedSection() {
               <Button
                 size="sm"
                 className="bg-red-600 text-white hover:bg-red-700"
-                onClick={() => window.dispatchEvent(new CustomEvent("nav:section", { detail: "anomalies" }))}
+                onClick={() => router.push("/anomalies")}
               >
                 <ShieldAlert className="mr-1 size-4" /> Show Anomalies
               </Button>
