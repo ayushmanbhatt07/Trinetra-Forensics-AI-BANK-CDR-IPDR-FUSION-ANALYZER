@@ -1506,14 +1506,14 @@ ORDER BY timestamp ASC LIMIT 30;"""
                         det["llm_model"] = meta.get("model", "")
                         det["llm_latency_ms"] = meta.get("latency_ms", 0)
                         self._remember(det, user_query)
-                        return det
+                        return self._finalize(det, entity_hint=start_node)
                     elif not execution_success:
                         if det:
                             det["llm_provider"] = meta.get("provider", "")
                             det["llm_model"] = meta.get("model", "")
                             det["llm_latency_ms"] = meta.get("latency_ms", 0)
                             self._remember(det, user_query)
-                            return det
+                            return self._finalize(det, entity_hint=start_node)
                     else:
                         fallback_sum, fallback_ans, fallback_risk = self._synthesize_records_narrative(user_query, sql_q, [])
                         interp_summary = fallback_sum
@@ -1543,7 +1543,7 @@ ORDER BY timestamp ASC LIMIT 30;"""
                     det["llm_model"] = meta.get("model", "")
                     det["llm_latency_ms"] = meta.get("latency_ms", 0)
                     self._remember(det, user_query)
-                    return det
+                    return self._finalize(det, entity_hint=start_node)
 
                 # General / conceptual question — no SQL, full interpretive answer
                 summary = (parsed.get("executive_summary") or general_answer

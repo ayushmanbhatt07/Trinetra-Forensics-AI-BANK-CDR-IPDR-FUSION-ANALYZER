@@ -25,16 +25,14 @@ from backend import config
 
 logger = logging.getLogger(__name__)
 
-# Primary model: High-throughput 250K TPM model (never rate-limited on large prompts)
-GROQ_MODEL = "openai/gpt-oss-20b"
+# Primary model: High-accuracy, high-capacity 120B reasoning model
+GROQ_MODEL = "openai/gpt-oss-120b"
 
-# Fallback chain — ordered by high throughput capacity & speed
+# Fallback chain — ordered by high reliability & speed
 FALLBACK_MODELS = [
-    "openai/gpt-oss-20b",           # Primary (250K TPM, 0.44s)
-    "openai/gpt-oss-120b",          # High-capacity 120B (250K TPM, 0.48s)
-    "qwen/qwen3.6-27b",             # Qwen Reasoning (8K TPM, 0.23s)
-    "groq/compound-mini",           # Compound Mini (0.80s)
-    "groq/compound",                # Compound Full (1.74s)
+    "openai/gpt-oss-120b",          # High-capacity 120B
+    "openai/gpt-oss-20b",           # 20B
+    "qwen/qwen3.6-27b",             # Qwen Reasoning
 ]
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -239,6 +237,12 @@ class LlmClient:
                 print(f"[KEY] [Groq LLM Call] Calling model '{model}' with API Key {key_masked} (key #{i+1}/{len(keys)})...", flush=True)
 
                 ok, parsed, err = self._post_json(_GROQ_URL, payload, key, self.request_timeout)
+                # If JSON mode failed with 400 (unsupported response_format or validation error), retry without response_format
+                if not ok and json_mode and "400" in err:
+                    payload_no_json = dict(payload)
+                    payload_no_json.pop("response_format", None)
+                    ok, parsed, err = self._post_json(_GROQ_URL, payload_no_json, key, self.request_timeout)
+
                 latency_sec = self.latency_ms / 1000.0
 
                 if ok:
