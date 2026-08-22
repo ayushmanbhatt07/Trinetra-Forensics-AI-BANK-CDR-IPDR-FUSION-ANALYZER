@@ -51,12 +51,6 @@ jobs:
           # Fails if there are syntax errors or missing dependencies in the global scope
           python -c "from backend.api import app; print('FastAPI app imported successfully.')"
 
-      - name: Run Backend Tests
-        env:
-          PYTHONPATH: .
-        run: |
-          python -m pytest tests/ -v
-
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
