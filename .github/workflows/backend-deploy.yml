@@ -1,6 +1,7 @@
 name: Backend Deploy
 
 on:
+  workflow_dispatch:
   workflow_run:
     workflows: ["Backend CI"]
     types:
@@ -19,7 +20,7 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: read
       packages: write
@@ -27,14 +28,14 @@ jobs:
     steps:
       - name: Set CI commit variables
         run: |
-          CI_SHA="${{ github.event.workflow_run.head_sha }}"
+          CI_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
           echo "CI_SHA=${CI_SHA}" >> $GITHUB_ENV
           echo "CI_SHORT_SHA=${CI_SHA::7}" >> $GITHUB_ENV
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Downcase repository name for GHCR
         run: |
