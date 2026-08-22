@@ -195,18 +195,19 @@ def _run_unsupervised(X: np.ndarray) -> dict[str, np.ndarray]:
             logger.warning("[ANOMALY] ZScore failed: %s", exc)
             return None
 
-    # Removed _lof, _dbscan, and _hdbscan (O(N^2) distance calculations) for latency optimization
+    # Run detectors SEQUENTIALLY to prevent concurrent OOM on low-RAM VPS (<= 1GB RAM servers).
+    # IsolationForest + OneClassSVM + PCA + ZScore running simultaneously can exceed 512MB-1GB RAM.
     detectors = [_isolation_forest, _ocsvm, _pca, _zscore]
-    with ThreadPoolExecutor(max_workers=config.max_workers()) as ex:
-        futures = [ex.submit(fn) for fn in detectors]
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result is not None:
-                    name, scores = result
-                    out[name] = scores
-            except Exception as exc:
-                logger.warning("[ANOMALY] Detector worker raised: %s", exc)
+    import gc
+    for fn in detectors:
+        try:
+            result = fn()
+            if result is not None:
+                name, scores = result
+                out[name] = scores
+        except Exception as exc:
+            logger.warning("[ANOMALY] Detector worker raised: %s", exc)
+        gc.collect()  # Free memory between each model to avoid concurrent RSS peak
 
     return out
 

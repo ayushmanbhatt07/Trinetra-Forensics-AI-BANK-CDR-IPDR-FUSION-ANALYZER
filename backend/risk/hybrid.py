@@ -176,25 +176,18 @@ def _compute(bundle: dict) -> dict:
             logger.warning("[HYBRID] internet_scores failed: %s", e)
             return ("internet", {"txn": {}, "ip": {}})
 
-    with ThreadPoolExecutor(max_workers=config.max_workers()) as executor:
-        futs = [
-            executor.submit(_run_behavioural),
-            executor.submit(_run_heat),
-            executor.submit(_run_ensemble),
-            executor.submit(_run_txn_ml),
-            executor.submit(_run_prof_txn),
-            executor.submit(_run_prof_acc),
-            executor.submit(_run_temporal_txn),
-            executor.submit(_run_temporal_acc),
-            executor.submit(_run_telecom),
-            executor.submit(_run_internet),
-        ]
-        for f in as_completed(futs):
-            try:
-                key, val = f.result()
-                g1_results[key] = val
-            except Exception as e:
-                logger.warning("[HYBRID] G1 worker raised unhandled: %s", e)
+    # Run G1 engines SEQUENTIALLY to prevent concurrent OOM on low-RAM VPS (<= 1GB RAM).
+    # Running 10 ML/analytics engines concurrently causes peak RSS > 512MB → Docker OOM → 502.
+    import gc
+    for fn in [_run_behavioural, _run_heat, _run_ensemble, _run_txn_ml,
+               _run_prof_txn, _run_prof_acc, _run_temporal_txn, _run_temporal_acc,
+               _run_telecom, _run_internet]:
+        try:
+            key, val = fn()
+            g1_results[key] = val
+        except Exception as e:
+            logger.warning("[HYBRID] G1 worker raised unhandled: %s", e)
+        gc.collect()  # Release memory between each engine
 
     behavioural = g1_results["behavioural"]
     heat = g1_results["heat"]
@@ -234,18 +227,14 @@ def _compute(bundle: dict) -> dict:
         "entity": {"account_exposure": {}, "entities": {}},
         "gfeats": ({}, {})
     }
-    with ThreadPoolExecutor(max_workers=config.max_workers()) as executor:
-        futs2 = [
-            executor.submit(_run_moneyflow),
-            executor.submit(_run_entity),
-            executor.submit(_run_graph),
-        ]
-        for f in as_completed(futs2):
-            try:
-                key, val = f.result()
-                g2_results[key] = val
-            except Exception as e:
-                logger.warning("[HYBRID] G2 worker raised unhandled: %s", e)
+    # G2 also sequential to avoid concurrent graph + moneyflow + entity memory spike.
+    for fn in [_run_moneyflow, _run_entity, _run_graph]:
+        try:
+            key, val = fn()
+            g2_results[key] = val
+        except Exception as e:
+            logger.warning("[HYBRID] G2 worker raised unhandled: %s", e)
+        gc.collect()
 
     moneyflow = g2_results["moneyflow"]
     entity = g2_results["entity"]
