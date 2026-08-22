@@ -53,14 +53,28 @@ def _is_amount(tok: str) -> bool:
 
 def extract_pdf_lines(path: str) -> list[str]:
     lines: list[str] = []
-    # Fast path: pdfminer high_level (10x faster than pdfplumber table layout parsing)
+    # Fast path 1: pypdf (pure-python stream decoder, 50x faster than visual layout engines)
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(path)
+        for page in reader.pages:
+            txt = page.extract_text() or ""
+            if txt:
+                lines.extend(_sanitize(txt).splitlines())
+        clean = [ln.strip() for ln in lines if ln.strip()]
+        if clean and sum(len(l) for l in clean) >= 50:
+            return clean
+    except Exception:
+        pass
+
+    # Fast path 2: pdfminer high_level
     try:
         from pdfminer.high_level import extract_text as _pm_extract_text
         raw = _pm_extract_text(path)
         if raw and len(raw.strip()) >= 50:
-            lines = _sanitize(raw).splitlines()
-            if lines and sum(len(l) for l in lines) >= 50:
-                return lines
+            clean = [ln.strip() for ln in _sanitize(raw).splitlines() if ln.strip()]
+            if clean and sum(len(l) for l in clean) >= 50:
+                return clean
     except Exception:
         pass
 
@@ -79,7 +93,7 @@ def extract_pdf_lines(path: str) -> list[str]:
         if "password" in str(e).lower() or "encrypted" in str(e).lower():
             raise ValueError("password-protected PDF: skipped") from e
         raise ValueError(f"unreadable PDF: {str(e)[:80]}") from e
-    return lines
+    return [ln.strip() for ln in lines if ln.strip()]
 
 
 def _join_split_dates(lines: list[str]) -> list[str]:
@@ -131,6 +145,7 @@ def _splice_bandhan_years(lines: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 FAMILY_LAYOUTS: dict = {
     # family: (header hints that must all appear within a 3-line window, kind)
+    "casa":    (["post date", "debit", "credit", "balance"], "amt_bal"),
     "axis8":   (["transaction particulars", "dr/cr"], "amt_bal"),
     "axis7":   (["tran date", "particulars", "debit", "credit"], "amt_bal"),
     "federal": (["withdrawals", "deposits", "dr/cr"], "gen"),
@@ -148,11 +163,12 @@ FAMILY_LAYOUTS: dict = {
     "generic": (["balance"], "gen"),
 }
 
-FAMILY_ORDER = ("axis8", "axis7", "federal", "hdfc", "kotak", "bandhan", "pnb",
+FAMILY_ORDER = ("casa", "axis8", "axis7", "federal", "hdfc", "kotak", "bandhan", "pnb",
                 "union", "icici", "utkarsh", "yes", "rbl", "cityunion",
                 "associate", "generic")
 
 BANK_NAMES = {
+    "casa": "Canara / Gramin Bank",
     "axis8": "Axis Bank", "axis7": "Axis Bank", "federal": "Federal Bank",
     "hdfc": "HDFC Bank", "kotak": "Kotak Mahindra Bank",
     "bandhan": "Bandhan Bank", "pnb": "Punjab National Bank",
@@ -288,18 +304,24 @@ def _normalise_row(tokens: list[str], family: str, prev_balance: float | None,
         date_fmts = DATE_FORMATS_HDFC
     elif family == "bandhan":
         date_fmts = DATE_FORMATS_BANDHAN
-    if tokens[0].isdigit() and len(tokens[0]) >= 8:  # stray account/ref column
+    if tokens[0].isdigit() and len(tokens) > 1 and parse_date(clean_field(tokens[1]), date_fmts, period):
+        tokens = tokens[1:]
+    elif tokens[0].isdigit() and len(tokens[0]) >= 8:  # stray account/ref column
         tokens = tokens[1:]
     date = parse_date(clean_field(tokens[0]), date_fmts, period)
     if not date:
         return None
     idx = 1
     value_date = ""
-    if len(tokens) > 1:
-        vd = parse_date(clean_field(tokens[1]), date_fmts, period)
+    txn_time = ""
+    if len(tokens) > 1 and re.match(r"^\d{2}:\d{2}(:\d{2})?$", tokens[1]):
+        txn_time = tokens[1]
+        idx = 2
+    if len(tokens) > idx:
+        vd = parse_date(clean_field(tokens[idx]), date_fmts, period)
         if vd and vd != date:
             value_date = vd
-            idx = 2
+            idx += 1
     amts, suffix = _amounts(tokens)
     if not amts:
         return None
@@ -413,7 +435,10 @@ def _parse_lines(path: str, lines: list[str], source_format: str) -> dict:
         if not s or SKIP_LINE_RE.match(s):
             continue
         tokens = s.split()
-        date = parse_date(clean_field(tokens[0]), date_fmts, period)
+        if tokens[0].isdigit() and len(tokens) > 1 and parse_date(clean_field(tokens[1]), date_fmts, period):
+            date = parse_date(clean_field(tokens[1]), date_fmts, period)
+        else:
+            date = parse_date(clean_field(tokens[0]), date_fmts, period)
         if not date:
             if last_row is not None:
                 last_row["narration"] += " " + s
