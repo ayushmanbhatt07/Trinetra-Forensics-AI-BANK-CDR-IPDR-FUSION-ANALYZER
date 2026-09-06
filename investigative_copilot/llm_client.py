@@ -24,19 +24,20 @@ from backend import config
 logger = logging.getLogger(__name__)
 
 # Primary model: High-accuracy, high-capacity reasoning / versatility
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 
-# Fallback models ordered by quality, capability, and token limits
+# Fallback models ordered by quality, capability, and active status on Groq
 FALLBACK_MODELS = [
-    "llama-3.3-70b-versatile",       # LLaMA 3.3 70B (primary versatile)
-    "openai/gpt-oss-120b",           # High-capacity 120B reasoning
-    "openai/gpt-oss-20b",            # 20B fast model
-    "llama-3.1-8b-instant",          # LLaMA 3.1 8B (ultra-fast instant fallback)
-    "qwen/qwen3.6-27b",              # Qwen 27B reasoning
-    "groq/compound",                 # Groq Compound
-    "groq/compound-mini",            # Groq Compound Mini
-    "allam-2-7b",                    # Fast 7B model
-    "canopylabs/orpheus-v1-english", # Fast English model
+    "openai/gpt-oss-120b",           # High-capacity 120B reasoning (active on Groq)
+    "openai/gpt-oss-20b",            # 20B fast model (active on Groq)
+    "qwen/qwen3.8-27b",              # Qwen 3.8 27B (active on Groq)
+    "qwen/qwen3.6-27b",              # Qwen 3.6 27B reasoning (active on Groq)
+    "groq/compound",                 # Groq Compound (active on Groq)
+    "groq/compound-mini",            # Groq Compound Mini (active on Groq)
+    "allam-2-7b",                    # Fast 7B model (active on Groq)
+    "canopylabs/orpheus-v1-english", # Fast English model (active on Groq)
+    "llama-3.3-70b-versatile",       # LLaMA 3.3 70B
+    "llama-3.1-8b-instant",          # LLaMA 3.1 8B
 ]
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"

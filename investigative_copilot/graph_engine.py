@@ -30,11 +30,13 @@ class CopilotGraphEngine:
         tx_rows = cursor.fetchall()
         for row in tx_rows:
             r = dict(row)
+            s_name = r.get("sender_customer_name") or "Sender"
+            r_name = r.get("receiver_customer_name") or "Counterparty"
             s_acc = str(r["sender_account_number"]) if r["sender_account_number"] else None
             r_acc = str(r["receiver_account_number"]) if r["receiver_account_number"] else None
             
             if s_acc:
-                s_name = r.get("sender_customer_name")
+                s_name = r.get("sender_customer_name") or s_name
                 s_phone = str(r["sender_phone_number"]) if r.get("sender_phone_number") else None
                 if s_acc not in self.graph:
                     self.graph.add_node(s_acc, type="account", name=s_name, phone=s_phone)
@@ -52,7 +54,7 @@ class CopilotGraphEngine:
                     self.graph.add_edge(s_acc, s_phone, edge_type="account_phone_link")
 
             if r_acc:
-                r_name = r.get("receiver_customer_name")
+                r_name = r.get("receiver_customer_name") or r_name
                 r_phone = str(r["receiver_phone_number"]) if r.get("receiver_phone_number") else None
                 if r_acc not in self.graph:
                     self.graph.add_node(r_acc, type="account", name=r_name, phone=r_phone)

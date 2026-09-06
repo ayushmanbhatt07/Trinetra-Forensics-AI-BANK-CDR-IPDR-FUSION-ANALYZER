@@ -33,14 +33,34 @@ from .util import (
 # amount token: decimal point required OR comma-grouped integer (20,000);
 # optional Cr/Dr/(Cr) suffix. Ref/cheque numbers are never comma-grouped.
 AMOUNT_RE = re.compile(
-    r"^(?:\d{1,3}(?:,\d{3})+(?:\.\d{2,3})?|(?:[\d,]{1,12}\.\d{2,3}|\.\d{2,3}))"
+    r"^(?:\d{1,3}(?:,\d{2,3})+(?:\.\d{2,3})?|(?:[\d,]{1,12}\.\d{2,3}|\.\d{2,3}))"
     r"(?:\(?[CcDd][Rr]\)?)?$")
 PARTIAL_DATE_RE = re.compile(r"(\d{2}-[A-Za-z]{3}-$|\d{1,2}/\d{1,2}/\d{1,2}$)")
 SKIP_LINE_RE = re.compile(
     r"^(page\s*\d+|disclaimer|this is system|registered office|grand total|"
     r"opening balance|closing balance|b/f|brought forward|balance forward|"
-    r"swipe limit|available balance|elapsed|[-_=]{4,})", re.IGNORECASE)
+    r"swipe limit|available balance|elapsed|[-_=]{4,}|summary\s*:|total debits|"
+    r"total credits|linked\s|no records found|other digital|facility\s|disclaimer|"
+    r"si\s+scheme\s|scheme\s+type|sanctioned\s+limit|locker\s+type|"
+    r"linked or not|further it does not|generated date)", re.IGNORECASE)
 DENSIFY_RE = re.compile(r"\(cid:\d+\)")
+# Date token at start of a line (possibly after a serial number):
+DATE_TOKEN_RE = re.compile(
+    r"^\d{1,2}[/-](?:\d{1,2}|[A-Za-z]{3})[/-]\d{2,4}$")
+# Line starts with serial_number + date:
+SERIAL_DATE_RE = re.compile(
+    r"^\s*(\d{1,4})\s+(\d{1,2}[/-](?:\d{1,2}|[A-Za-z]{3})[/-]\d{2,4})\b")
+# Page footer pattern (e.g., '1 of 2', 'Page 1'):
+PAGE_FOOTER_RE = re.compile(
+    r"^\s*(?:\d+\s+of\s+\d+|page\s*\d+)\s*$", re.IGNORECASE)
+# Section headers that indicate the transaction table has ended:
+END_OF_TABLE_RE = re.compile(
+    r"^(?:summary\s*:?|linked\s+(?:casa|deposits?|loans?|lockers?|accounts?)|"
+    r"other\s+digital\s+products|facility\s+sms|summary\s+of\s+accounts|"
+    r"account\s+summary|end\s+of\s+statement|\*{3,}\s*end|"
+    r"total\s+debits?|total\s+credits?|grand\s+total|cheque\s+book\s+details|"
+    r"sanctioned\s+limit|si\s+scheme\s+type|closure\s+details|"
+    r"disclaimer\s*:|this\s+is\s+a\s+computer\s+generated)", re.IGNORECASE)
 
 
 def _sanitize(text: str) -> str:
@@ -140,6 +160,124 @@ def _splice_bandhan_years(lines: list[str]) -> list[str]:
     return out
 
 
+def _join_multiline_rows(lines: list[str], date_fmts: tuple = None) -> list[str]:
+    """Merge multi-line transaction rows into single logical lines.
+
+    Many Indian bank PDFs (Union Bank, BOI, etc.) split each transaction
+    across 2-3 physical lines:
+        Line A:  SI  DATE  narration_start …
+        Line B:  narration_continuation …
+        Line C:  amount1  amount2  [Cr|Dr]
+
+    This pass reassembles them so the main parser sees one line per
+    transaction with date + narration + amounts together.
+    """
+    if date_fmts is None:
+        date_fmts = DATE_FORMATS_DEFAULT
+    out: list[str] = []
+    buf: list[str] = []          # accumulates fragments of current txn
+
+    def _flush():
+        if buf:
+            out.append(" ".join(buf))
+            buf.clear()
+
+    def _line_starts_txn(ln: str) -> bool:
+        """Does this line look like the start of a new transaction row?"""
+        s = ln.strip()
+        if not s:
+            return False
+        toks = s.split()
+        if not toks:
+            return False
+        # Pattern 1: serial_number + date  (e.g. '1 02-08-2026 …')
+        if (len(toks) >= 2 and toks[0].isdigit() and len(toks[0]) <= 4
+                and DATE_TOKEN_RE.match(toks[1])):
+            return True
+        # Pattern 2: bare date at start  (e.g. '02-08-2026 …')
+        if DATE_TOKEN_RE.match(toks[0]):
+            return True
+        return False
+
+    def _is_amount_only_line(ln: str) -> bool:
+        """Line contains ONLY amount tokens (+ optional Cr/Dr suffix)."""
+        toks = ln.strip().split()
+        if not toks:
+            return False
+        meaningful = [t for t in toks
+                      if not re.fullmatch(r"(?:[CcDd][Rr]|\(?[CcDd][Rr]\)?)", t)]
+        return bool(meaningful) and all(_is_amount(t) for t in meaningful)
+
+    def _is_page_break(ln: str) -> bool:
+        """Detect page footers/headers that interrupt transaction flow."""
+        s = ln.strip()
+        return bool(PAGE_FOOTER_RE.match(s))
+
+    i = 0
+    in_table = False
+    while i < len(lines):
+        ln = lines[i]
+        s = ln.strip()
+
+        # Skip blank lines
+        if not s:
+            i += 1
+            continue
+
+        # Once we see the first transaction, we're in the table
+        if _line_starts_txn(ln):
+            in_table = True
+
+        if not in_table:
+            out.append(ln)
+            i += 1
+            continue
+
+        # Skip page footers/headers that appear mid-table
+        if _is_page_break(ln):
+            i += 1
+            continue
+
+        # Skip repeated table headers on subsequent pages
+        low = s.lower()
+        if ('date' in low and ('particulars' in low or 'narration' in low)
+                and ('balance' in low or 'withdrawal' in low or 'deposit' in low
+                     or 'debit' in low or 'credit' in low)):
+            i += 1
+            continue
+
+        # Stop table ingestion if a terminal section (summary, linked accounts, etc.) starts
+        if END_OF_TABLE_RE.match(s):
+            _flush()
+            in_table = False
+            out.append(ln)
+            i += 1
+            continue
+
+        if SKIP_LINE_RE.match(s):
+            _flush()
+            out.append(ln)
+            i += 1
+            continue
+
+        if _line_starts_txn(ln):
+            _flush()  # emit previous transaction
+            buf.append(s)
+            i += 1
+            continue
+
+        # Continuation line (narration fragment or amount-only line)
+        if buf:
+            buf.append(s)
+        else:
+            # Stray line before first transaction — pass through
+            out.append(ln)
+        i += 1
+
+    _flush()
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Layout registry
 # ---------------------------------------------------------------------------
@@ -153,19 +291,24 @@ FAMILY_LAYOUTS: dict = {
     "kotak":   (["narration", "withdrawal (dr)"], "gen"),
     "bandhan": (["trans value", "description", "debits"], "gen"),
     "pnb":     (["gl.", "debit amount", "credit amount"], "gen"),
-    "union":   (["particulars", "withdrawals", "deposits", "balance"], "gen"),
+    "union":   (["particulars", "withdrawal", "deposit", "balance"], "gen"),
     "icici":   (["transaction details", "cheque no", "debit"], "gen"),
     "utkarsh": (["value date", "transaction", "debit", "credit"], "gen"),
     "yes":     (["description", "reference", "debits", "credits"], "gen"),
     "associate": (["narra", "chequeno", "debit", "credit", "balance"], "gen"),
     "cityunion": (["particulars", "chq no", "debit", "credit", "balance"], "gen"),
     "rbl":     (["tran particular", "debit amount", "credit amount"], "gen"),
+    "sbi":     (["txn date", "description", "debit", "credit", "balance"], "gen"),
+    "bob":     (["transaction date", "debit", "credit", "balance"], "gen"),
+    "boi":     (["date", "particulars", "debit", "credit", "balance"], "gen"),
+    "idbi":    (["txn posted date", "cheque/ref no", "debit", "credit"], "gen"),
+    "indian":  (["date", "description", "debit", "credit", "balance"], "gen"),
     "generic": (["balance"], "gen"),
 }
 
 FAMILY_ORDER = ("casa", "axis8", "axis7", "federal", "hdfc", "kotak", "bandhan", "pnb",
                 "union", "icici", "utkarsh", "yes", "rbl", "cityunion",
-                "associate", "generic")
+                "associate", "sbi", "bob", "boi", "idbi", "indian", "generic")
 
 BANK_NAMES = {
     "casa": "Canara / Gramin Bank",
@@ -175,7 +318,9 @@ BANK_NAMES = {
     "union": "Union Bank of India", "utkarsh": "Utkarsh Small Finance Bank",
     "yes": "Yes Bank", "associate": "Associate Co-operative Bank",
     "cityunion": "City Union Bank", "rbl": "RBL Bank",
-    "icici": "ICICI Bank", "generic": "",
+    "icici": "ICICI Bank", "sbi": "State Bank of India",
+    "bob": "Bank of Baroda", "boi": "Bank of India",
+    "idbi": "IDBI Bank", "indian": "Indian Bank", "generic": "",
 }
 
 IFSC_OVERRIDES = {
@@ -183,6 +328,28 @@ IFSC_OVERRIDES = {
     "ICIC": "icici", "KKBK": "kotak", "PUNB": "pnb", "UBIN": "union",
     "UTKS": "utkarsh", "YESB": "yes", "UCBA": "pnb", "CIUB": "cityunion",
     "GSCB": "associate", "RATN": "rbl",
+    "SBIN": "sbi", "BARB": "bob", "BKID": "boi", "IBKL": "idbi",
+    "IDIB": "indian", "CNRB": "casa", "CBIN": "casa",
+}
+
+IFSC_PREFIX_TO_BANK: dict[str, str] = {
+    "UTIB": "Axis Bank", "UBIN": "Union Bank of India",
+    "SBIN": "State Bank of India", "PUNB": "Punjab National Bank",
+    "HDFC": "HDFC Bank", "ICIC": "ICICI Bank",
+    "KKBK": "Kotak Mahindra Bank", "BARB": "Bank of Baroda",
+    "BKID": "Bank of India", "IBKL": "IDBI Bank",
+    "IDIB": "Indian Bank", "CNRB": "Canara Bank",
+    "CBIN": "Central Bank of India", "FDRL": "Federal Bank",
+    "BDBL": "Bandhan Bank", "YESB": "Yes Bank",
+    "CIUB": "City Union Bank", "RATN": "RBL Bank",
+    "IOBA": "Indian Overseas Bank", "UCBA": "UCO Bank",
+    "PSIB": "Punjab & Sind Bank", "CORP": "Union Bank of India",
+    "ANDB": "Union Bank of India", "ALLA": "Indian Bank",
+    "SYNB": "Canara Bank", "ORBC": "Punjab National Bank",
+    "VIJB": "Bank of Baroda", "MAHB": "Bank of Maharashtra",
+    "IDFB": "IDFC First Bank", "INDB": "IndusInd Bank",
+    "AUBL": "AU Small Finance Bank", "ESFB": "Equitas Small Finance Bank",
+    "UTKS": "Utkarsh Small Finance Bank", "GSCB": "Gujarat State Co-operative Bank",
 }
 TEXT_OVERRIDES: list[tuple[str, str]] = []
 
@@ -229,18 +396,29 @@ ACCOUNT_RE = {
     "hdfc": r"accountno\s*:?\s*(\d{10,})",
     "kotak": r"account\s*no\s*:?\s*(\d{10,})",
     "pnb": r"(?:acct\s*range\s*:?\s*(\d{6,})\s*to|account\s*no\s*:?\s*(\d{6,}))",
-    "union": r"a/c\s*no:?\s*(\d{10,})",
+    "union": r"(?:a/c\s*no:?\s*(\d{10,})|account\s*number\s*:?\s*([\dX]{10,}))",
     "utkarsh": r"(?:account\s*number|account\s*no\.?)[\d\s]{0,30}?(\d{12,})",
     "yes": r"a/c\s*number:?\s*(\d{10,})",
     "associate": r"a/c\s*no:?\s*(\d{10,})",
     "cityunion": r"account\s*no\s*:?\s*(\d{10,})",
     "rbl": r"account\s*no:?\s*(\d{9,})",
     "icici": r"account\s*no\s*:?\s*(\d{10,})",
-    "generic": r"account\s*(?:no|number)?\s*:?\s*(\d{10,})",
+    "sbi": r"account\s*(?:no|number)\s*:?\s*([\dX]{10,})",
+    "bob": r"account\s*(?:no|number)\s*:?\s*([\dX]{10,})",
+    "boi": r"account\s*(?:no|number)\s*:?\s*([\dX]{10,})",
+    "idbi": r"account\s*(?:no|number)\s*:?\s*([\dX]{10,})",
+    "indian": r"account\s*(?:no|number)\s*:?\s*([\dX]{10,})",
+    "generic": r"account\s*(?:no|number)?\s*:?\s*([\dX]{10,})",
 }
 IFSC_RE = re.compile(r"ifsc\s*(?:code)?\s*:?\s*([A-Za-z]{4}\d{7})", re.IGNORECASE)
-NAME_BAD = ("bank", "bldg", "road", "street", "society", "apartment", "opp.",
-            "phone", "email", "cust", "branch", "ltd", "limited", "smt", "shri")
+NAME_BAD = (
+    "bank", "bldg", "road", "street", "society", "apartment", "opp.",
+    "phone", "email", "cust", "branch", "ltd", "limited", "smt", "shri",
+    "details", "statement", "account", "address", "nomination", "transaction",
+    "summary", "saving", "current", "balance", "registered", "customer",
+    "generated", "facility", "scheme", "locker", "page", "period", "currency",
+    "joint", "holder", "kyc", "ckyc", "micr", "ifsc", "pan", "description"
+)
 
 
 def _meta_from_header(lines: list[str], family: str) -> dict:
@@ -255,29 +433,59 @@ def _meta_from_header(lines: list[str], family: str) -> dict:
         meta["account_no"] = next((g for g in m.groups() if g), "")
     for ln in lines[:60]:
         low = ln.lower()
-        pm = re.search(r"from\s+([\dA-Za-z-]+?)\s+to\s+([\dA-Za-z-]+)", ln, re.I)
-        if pm and ("period" in low or "statement" in low):
-            meta["period_start"] = pm.group(1).strip()
-            meta["period_end"] = pm.group(2).strip()
-            break
-    for ln in lines[:25]:
-        s = ln.strip().rstrip(".")
-        if not s or re.search(r"\d", s):
-            continue
-        if any(b in s.lower() for b in NAME_BAD):
-            continue
-        if re.match(r"^[A-Z][A-Z ./'-]{3,60}$", s):
-            meta["account_name"] = s
-            break
+        if "period" in low or "statement" in low or "from" in low:
+            pm = re.search(r"(?:from\s*:?|period\s*:?)\s*([A-Za-z0-9/-]{8,12})\s+(?:to\s*:?|-)\s*([A-Za-z0-9/-]{8,12})", ln, re.I)
+            if pm:
+                meta["period_start"] = pm.group(1).strip()
+                meta["period_end"] = pm.group(2).strip()
+                break
+
+    # Look for name labeled explicitly (on the same line or immediate next line)
+    for i, ln in enumerate(lines[:30]):
+        s = ln.strip()
+        if re.match(r"^(?:name\s*(?:&|\+)?\s*address|account\s*name|customer\s*name|holder\s*name)\s*:\s*$", s, re.I):
+            if i + 1 < len(lines):
+                cand = lines[i + 1].strip()
+                if cand and not any(b in cand.lower() for b in NAME_BAD) and not re.search(r"\d", cand):
+                    meta["account_name"] = cand
+                    break
+        m = re.match(r"^(?:name\s*(?:&|\+)?\s*address|account\s*name|customer\s*name|holder\s*name|account\s*title)\s*:\s*([-A-Za-z ./\']{2,60})$", s, re.I)
+        if m:
+            cand = m.group(1).strip()
+            if cand and not any(b in cand.lower() for b in NAME_BAD):
+                meta["account_name"] = cand
+                break
+
+    # Standalone name search in header lines (common in Indian PDFs like Axis, Canara)
+    if not meta["account_name"]:
+        for ln in lines[:25]:
+            s = ln.strip().rstrip(".")
+            if not s or re.search(r"\d", s) or len(s) < 3:
+                continue
+            if any(b in s.lower() for b in NAME_BAD):
+                continue
+            if re.match(r"^[A-Z][-A-Z ./\']{2,60}$", s):
+                meta["account_name"] = s
+                break
     if not meta["account_name"]:
         m = re.search(r"(?:name\s*:?\s*|account\s*title\s*:?\s*)"
-                      r"([A-Za-z][A-Za-z ./'-]{3,60})", text, re.I)
+                      r"([-A-Za-z ./\']{3,60})", text, re.I)
         if m:
             meta["account_name"] = m.group(1).strip()
     if not meta["account_name"]:
-        m = re.search(r"INR\s+([A-Z][A-Z .]{3,50})$", text, re.M)
+        m = re.search(r"INR\s+([A-Z][-A-Z .]{3,50})$", text, re.M)
         if m:
             meta["account_name"] = m.group(1).strip()
+
+    # Deduce bank name from IFSC prefix or statement text if not already populated
+    if not meta["bank"] and meta["ifsc"]:
+        prefix = meta["ifsc"][:4].upper()
+        meta["bank"] = IFSC_PREFIX_TO_BANK.get(prefix, "")
+    if not meta["bank"]:
+        for pfx, bname in IFSC_PREFIX_TO_BANK.items():
+            if bname.lower() in text.lower():
+                meta["bank"] = bname
+                break
     return meta
 
 
@@ -292,6 +500,18 @@ def _amounts(tokens: list[str]) -> tuple[list[str], str]:
         m = re.match(r"^.*?\(?([CcDd][Rr])\)?$", amts[-1])
         if m:
             suffix = m.group(1).upper()
+        else:
+            # Check if token immediately following the last amount token is Cr/Dr
+            try:
+                last_amt_str = amts[-1]
+                last_idx = len(tokens) - 1 - tokens[::-1].index(last_amt_str)
+                if last_idx + 1 < len(tokens):
+                    nxt = tokens[last_idx + 1].strip().upper()
+                    sm = re.match(r"^\(?([CD]R)\)?$", nxt)
+                    if sm:
+                        suffix = sm.group(1)
+            except (ValueError, IndexError):
+                pass
     return amts, suffix
 
 
@@ -304,7 +524,11 @@ def _normalise_row(tokens: list[str], family: str, prev_balance: float | None,
         date_fmts = DATE_FORMATS_HDFC
     elif family == "bandhan":
         date_fmts = DATE_FORMATS_BANDHAN
-    if tokens[0].isdigit() and len(tokens) > 1 and parse_date(clean_field(tokens[1]), date_fmts, period):
+    # Strip leading serial number (1-4 digit SI column)
+    if (tokens[0].isdigit() and len(tokens[0]) <= 4 and len(tokens) > 1
+            and parse_date(clean_field(tokens[1]), date_fmts, period)):
+        tokens = tokens[1:]
+    elif tokens[0].isdigit() and len(tokens) > 1 and parse_date(clean_field(tokens[1]), date_fmts, period):
         tokens = tokens[1:]
     elif tokens[0].isdigit() and len(tokens[0]) >= 8:  # stray account/ref column
         tokens = tokens[1:]
@@ -402,14 +626,33 @@ def _parse_lines(path: str, lines: list[str], source_format: str) -> dict:
         header_idx = _find_header(joined, family)
     if family == "generic" and header_idx < len(joined):
         # No reliable table header in line-layout exports: start from the
-        # first line that begins with a date.
+        # first line that begins with a date (possibly prefixed by SI no).
         for i, ln in enumerate(joined):
             if re.match(r"^\s*\d{1,2}[/-][A-Za-z0-9]", ln):
+                header_idx = max(i - 1, 0)
+                break
+            # serial number + date  (e.g. '1 02-08-2026 …')
+            if SERIAL_DATE_RE.match(ln):
                 header_idx = max(i - 1, 0)
                 break
     if header_idx < 0 or header_idx >= len(joined):
         header_idx = 0
         family = "generic"
+    # ---- Multi-line join pass: merge fragmented transaction rows ----
+    joined = _join_multiline_rows(joined)
+    # Re-find header in the merged list since line numbers shifted
+    header_idx = _find_header(joined, family)
+    if header_idx < 0:
+        # fallback: find first transaction line
+        for i, ln in enumerate(joined):
+            if SERIAL_DATE_RE.match(ln.strip()):
+                header_idx = max(i - 1, 0)
+                break
+            if re.match(r"^\s*\d{1,2}[/-][A-Za-z0-9]", ln):
+                header_idx = max(i - 1, 0)
+                break
+    if header_idx < 0:
+        header_idx = 0
     date_fmts = DATE_FORMATS_DEFAULT
     if family == "hdfc":
         date_fmts = DATE_FORMATS_HDFC
@@ -424,9 +667,15 @@ def _parse_lines(path: str, lines: list[str], source_format: str) -> dict:
     prev_balance: float | None = None
     opening_balance: float | None = None
     last_row: dict | None = None
-    # Full-period statements print an opening balance; when the summary line
-    # is not machine-parseable, seed the direction heuristic at 0.00 so the
-    # first amount row can be oriented by balance movement.
+    # Try to extract numeric opening balance from statement text
+    ob_match = re.search(
+        r"opening\s+balance\s*:?\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\(?[CcDd][Rr]\)?)?",
+        text, re.IGNORECASE)
+    if ob_match:
+        opening_balance = parse_amount(ob_match.group(1))
+        if opening_balance is not None:
+            prev_balance = opening_balance
+    # Fallback: seed at 0 so the first amount row can be oriented
     if opening_balance is None and "opening balance" in text.lower():
         opening_balance = 0.0
         prev_balance = 0.0
@@ -434,13 +683,15 @@ def _parse_lines(path: str, lines: list[str], source_format: str) -> dict:
         s = ln.strip()
         if not s or SKIP_LINE_RE.match(s):
             continue
+        if END_OF_TABLE_RE.match(s):
+            break
         tokens = s.split()
         if tokens[0].isdigit() and len(tokens) > 1 and parse_date(clean_field(tokens[1]), date_fmts, period):
             date = parse_date(clean_field(tokens[1]), date_fmts, period)
         else:
             date = parse_date(clean_field(tokens[0]), date_fmts, period)
         if not date:
-            if last_row is not None:
+            if last_row is not None and len(last_row["narration"]) < 250:
                 last_row["narration"] += " " + s
             continue
         row = _normalise_row(list(tokens), family, prev_balance, period)
@@ -463,6 +714,21 @@ def _parse_lines(path: str, lines: list[str], source_format: str) -> dict:
         r["txn_id"] = f"{stem[:24]}_{i:06d}"
         r["source_file"] = path
         r["source_format"] = f"{family}_{source_format}"
+        if not r.get("bank"):
+            r["bank"] = meta.get("bank", "")
+        if not r.get("account_no"):
+            r["account_no"] = meta.get("account_no", "")
+        if not r.get("account_name"):
+            r["account_name"] = meta.get("account_name", "")
+        if not r.get("ifsc"):
+            r["ifsc"] = meta.get("ifsc", "")
+    if rows and (not meta.get("period_start") or not meta.get("period_end")):
+        valid_dates = sorted([r["date"] for r in rows if r.get("date")])
+        if valid_dates:
+            if not meta.get("period_start"):
+                meta["period_start"] = valid_dates[0]
+            if not meta.get("period_end"):
+                meta["period_end"] = valid_dates[-1]
     meta["family"] = family
     meta["layout"] = family
     meta["opening_balance"] = opening_balance
@@ -470,11 +736,113 @@ def _parse_lines(path: str, lines: list[str], source_format: str) -> dict:
     return {"records": rows, "meta": meta}
 
 
+def _parse_pdf_tables(path: str) -> dict | None:
+    """Fallback parser for PDFs with grid/tabular layout when line parsing finds 0 records."""
+    try:
+        import pdfplumber
+    except ImportError:
+        return None
+    try:
+        with pdfplumber.open(path) as pdf:
+            all_tables = []
+            for page in pdf.pages:
+                tables = page.extract_tables() or []
+                all_tables.extend(tables)
+            if not all_tables:
+                return None
+
+            records = []
+            header_map = None
+            for tbl in all_tables:
+                for row in tbl:
+                    if not row or not any(row):
+                        continue
+                    clean_row = [clean_field(c or "") for c in row]
+                    low_row = [c.lower() for c in clean_row]
+                    row_text = " ".join(low_row)
+                    if ("date" in row_text and
+                            any(w in row_text for w in ("particular", "narration", "description", "details")) and
+                            any(w in row_text for w in ("balance", "withdrawal", "deposit", "debit", "credit"))):
+                        header_map = {}
+                        for idx, col in enumerate(low_row):
+                            if "date" in col and "val" not in col and "value" not in col and "date" not in header_map:
+                                header_map["date"] = idx
+                            elif "val" in col and "date" in col:
+                                header_map["value_date"] = idx
+                            elif any(w in col for w in ("particular", "narration", "description", "details")):
+                                header_map["narration"] = idx
+                            elif any(w in col for w in ("debit", "withdrawal", "dr")):
+                                header_map["debit"] = idx
+                            elif any(w in col for w in ("credit", "deposit", "cr")):
+                                header_map["credit"] = idx
+                            elif "balance" in col:
+                                header_map["balance"] = idx
+                        continue
+
+                    if not header_map or "date" not in header_map:
+                        continue
+
+                    date_val = parse_date(clean_row[header_map["date"]], DATE_FORMATS_DEFAULT)
+                    if not date_val:
+                        continue
+
+                    narration = clean_row[header_map["narration"]] if "narration" in header_map and header_map["narration"] < len(clean_row) else ""
+                    narration = re.sub(r"\s+", " ", narration).strip()
+
+                    debit = parse_amount(clean_row[header_map["debit"]]) if "debit" in header_map and header_map["debit"] < len(clean_row) else None
+                    credit = parse_amount(clean_row[header_map["credit"]]) if "credit" in header_map and header_map["credit"] < len(clean_row) else None
+                    balance = parse_amount(clean_row[header_map["balance"]]) if "balance" in header_map and header_map["balance"] < len(clean_row) else None
+
+                    if debit is None and credit is None:
+                        continue
+                    debit = debit or 0.0
+                    credit = credit or 0.0
+
+                    records.append({
+                        "date": date_val,
+                        "value_date": clean_row[header_map["value_date"]] if "value_date" in header_map and header_map["value_date"] < len(clean_row) else "",
+                        "narration": narration,
+                        "debit": debit,
+                        "credit": credit,
+                        "balance": balance,
+                        "txn_type": "D" if debit > 0 else "C",
+                    })
+            if records:
+                meta = {"layout": "pdf_table", "family": "table", "row_count": len(records)}
+                stem = os.path.splitext(os.path.basename(path))[0]
+                for i, r in enumerate(records):
+                    r["txn_id"] = f"{stem[:24]}_{i:06d}"
+                    r["source_file"] = path
+                    r["source_format"] = "table_pdf"
+                return {"records": records, "meta": meta}
+    except Exception:
+        pass
+    return None
+
+
 def parse_bank_pdf(path: str) -> dict:
     lines = extract_pdf_lines(path)
     if not lines or sum(len(l) for l in lines) < 50:
+        tbl_res = _parse_pdf_tables(path)
+        if tbl_res and tbl_res.get("records"):
+            return tbl_res
         raise ValueError("scanned or image-only PDF: OCR required, skipped")
-    return _parse_lines(path, lines, "pdf")
+    res = _parse_lines(path, lines, "pdf")
+    if not res.get("records"):
+        tbl_res = _parse_pdf_tables(path)
+        if tbl_res and tbl_res.get("records"):
+            tbl_res["meta"].update({k: v for k, v in res.get("meta", {}).items() if v})
+            for r in tbl_res["records"]:
+                if not r.get("bank"):
+                    r["bank"] = tbl_res["meta"].get("bank", "")
+                if not r.get("account_no"):
+                    r["account_no"] = tbl_res["meta"].get("account_no", "")
+                if not r.get("account_name"):
+                    r["account_name"] = tbl_res["meta"].get("account_name", "")
+                if not r.get("ifsc"):
+                    r["ifsc"] = tbl_res["meta"].get("ifsc", "")
+            return tbl_res
+    return res
 
 
 def parse_bank_txt(path: str) -> dict:
